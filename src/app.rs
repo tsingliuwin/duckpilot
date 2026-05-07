@@ -326,6 +326,14 @@ impl App {
             FocusArea::Table => match key.code {
                 KeyCode::Up => self.table_view.scroll_up(),
                 KeyCode::Down => self.table_view.scroll_down(),
+                KeyCode::PageUp => self.table_view.page_up(20),
+                KeyCode::PageDown => self.table_view.page_down(20),
+                KeyCode::Home => {
+                    self.table_view.scroll_by(i32::MIN);
+                }
+                KeyCode::End => {
+                    self.table_view.scroll_by(i32::MAX);
+                }
                 _ => {}
             },
         }

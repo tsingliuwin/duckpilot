@@ -59,10 +59,6 @@ impl Selection {
             Some((a, h))
         }
     }
-
-    fn has_content(&self) -> bool {
-        self.ordered().is_some_and(|(s, e)| s != e)
-    }
 }
 
 /// 聊天面板状态
