@@ -13,27 +13,45 @@ impl DbEngine {
         // 加载必要的扩展
         let extensions = vec!["httpfs", "icu", "spatial", "excel", "ducklake"];
         for ext in extensions {
-            // 先尝试安装（如果已安装则跳过），然后加载
+            // 先尝试安装（如果已安装则跳过）
             let _ = conn.execute(&format!("INSTALL {};", ext), []);
-            conn.execute(&format!("LOAD {};", ext), [])?;
+            // 尝试加载，如果失败则打印警告但不退出（除了核心功能必需的扩展）
+            if let Err(e) = conn.execute(&format!("LOAD {};", ext), []) {
+                if ext == "ducklake" {
+                    // 如果 ducklake 必需，可以根据需求决定是否报错
+                    // 这里我们暂时记录警告，因为普通 DuckDB 也能工作
+                    eprintln!("警告: 无法加载 ducklake 扩展: {}", e);
+                }
+            }
         }
 
         // 初始化 DuckLake 目录
         let dp_dir = project_dir.join(".duckpilot");
+        if !dp_dir.exists() {
+            std::fs::create_dir_all(&dp_dir)?;
+        }
+        
         let lake_path = dp_dir.join("metadata.ducklake");
         let data_path = dp_dir.join("metadata.ducklake.files");
         
         // 挂载 DuckLake Catalog
-        // 使用 TYPE ducklake 确保以 DuckLake 格式挂载
+        // 如果 ducklake 扩展没加载成功，这里的 ATTACH 可能会失败
         let attach_query = format!(
             "ATTACH 'ducklake:{}' AS lake (DATA_PATH '{}')",
             lake_path.to_string_lossy(),
             data_path.to_string_lossy()
         );
-        conn.execute(&attach_query, [])?;
         
-        // 默认切换到 lake 数据库，这样创建的表都会在 DuckLake 中
-        conn.execute("USE lake", [])?;
+        match conn.execute(&attach_query, []) {
+            Ok(_) => {
+                // 默认切换到 lake 数据库
+                let _ = conn.execute("USE lake", []);
+            },
+            Err(e) => {
+                eprintln!("警告: 无法挂载 DuckLake 目录: {}", e);
+                // 降级使用默认内存数据库
+            }
+        }
 
         Ok(Self { conn })
     }
@@ -87,22 +105,20 @@ impl DbEngine {
     }
 
     fn get_table_schema(&self, table_name: &str, source_file: &str) -> Result<TableSchema> {
+        let mut columns = Vec::new();
         let mut stmt = self.conn.prepare(&format!("DESCRIBE \"{}\"", table_name))?;
-        let rows = stmt.query_map([], |row| {
+        let mut query_rows = stmt.query([])?;
+        
+        while let Some(row) = query_rows.next()? {
             let name: String = row.get(0)?;
             let data_type: String = row.get(1)?;
             let nullable_str: String = row.get(2)?;
-            Ok(ColumnInfo {
+            columns.push(ColumnInfo {
                 name,
                 data_type,
                 nullable: nullable_str == "YES",
-                sample_values: Vec::new(), // 暂时不获取样本值
-            })
-        })?;
-
-        let mut columns = Vec::new();
-        for row in rows {
-            columns.push(row?);
+                sample_values: Vec::new(),
+            });
         }
 
         // 获取行数
@@ -123,35 +139,43 @@ impl DbEngine {
     pub fn execute_query(&self, sql: &str) -> Result<QueryResultData> {
         let start = std::time::Instant::now();
         let mut stmt = self.conn.prepare(sql)?;
+        
+        // column_count() 在执行前调用通常是安全的
         let col_count = stmt.column_count();
-        let mut columns = Vec::new();
-        for i in 0..col_count {
-            columns.push(stmt.column_name(i)?.to_string());
-        }
-
+        
         let mut rows = Vec::new();
-        let mut query_rows = stmt.query([])?;
-        while let Some(row) = query_rows.next()? {
-            let mut row_data = Vec::new();
-            for i in 0..col_count {
-                let val: duckdb::types::Value = row.get(i)?;
-                let val_str = match val {
-                    duckdb::types::Value::Null => "NULL".to_string(),
-                    duckdb::types::Value::Boolean(b) => b.to_string(),
-                    duckdb::types::Value::TinyInt(i) => i.to_string(),
-                    duckdb::types::Value::SmallInt(i) => i.to_string(),
-                    duckdb::types::Value::Int(i) => i.to_string(),
-                    duckdb::types::Value::BigInt(i) => i.to_string(),
-                    duckdb::types::Value::HugeInt(i) => i.to_string(),
-                    duckdb::types::Value::Float(f) => f.to_string(),
-                    duckdb::types::Value::Double(f) => f.to_string(),
-                    duckdb::types::Value::Text(t) => t,
-                    duckdb::types::Value::Blob(b) => format!("<blob {} bytes>", b.len()),
-                    _ => format!("{:?}", val),
-                };
-                row_data.push(val_str);
+        {
+            let mut query_rows = stmt.query([])?;
+            while let Some(row) = query_rows.next()? {
+                let mut row_data = Vec::new();
+                for i in 0..col_count {
+                    let val: duckdb::types::Value = row.get(i)?;
+                    let val_str = match val {
+                        duckdb::types::Value::Null => "NULL".to_string(),
+                        duckdb::types::Value::Boolean(b) => b.to_string(),
+                        duckdb::types::Value::TinyInt(i) => i.to_string(),
+                        duckdb::types::Value::SmallInt(i) => i.to_string(),
+                        duckdb::types::Value::Int(i) => i.to_string(),
+                        duckdb::types::Value::BigInt(i) => i.to_string(),
+                        duckdb::types::Value::HugeInt(i) => i.to_string(),
+                        duckdb::types::Value::Float(f) => f.to_string(),
+                        duckdb::types::Value::Double(f) => f.to_string(),
+                        duckdb::types::Value::Text(t) => t,
+                        duckdb::types::Value::Blob(b) => format!("<blob {} bytes>", b.len()),
+                        _ => format!("{:?}", val),
+                    };
+                    row_data.push(val_str);
+                }
+                rows.push(row_data);
             }
-            rows.push(row_data);
+        }
+        // query_rows 已被 drop，stmt 的借用已释放，且 executed 标志已设为 true
+        
+        let mut columns = Vec::new();
+        if col_count > 0 {
+            for i in 0..col_count {
+                columns.push(stmt.column_name(i)?.to_string());
+            }
         }
 
         let execution_time_ms = start.elapsed().as_millis() as u64;

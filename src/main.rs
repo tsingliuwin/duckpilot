@@ -86,7 +86,7 @@ async fn cmd_init(project_dir: &std::path::Path) -> Result<()> {
 /// 启动交互式 TUI 聊天
 async fn cmd_chat(project_dir: &std::path::Path) -> Result<()> {
     let mut events = tui::event::EventHandler::new(Duration::from_millis(250));
-    let mut app = app::App::new(project_dir.to_path_buf(), events.sender.clone());
+    let mut app = app::App::new(project_dir.to_path_buf(), events.sender.clone())?;
     
     // 启动后台扫描
     app.start_scanning();

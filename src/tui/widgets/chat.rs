@@ -45,13 +45,6 @@ pub struct ChatPanel {
     /// 内容是否发生了变化，需要重建缓存
     lines_dirty: bool,
 
-    /// 鼠标选择范围：(start_line, start_col) 到 (end_line, end_col)
-    selection: Option<((usize, usize), (usize, usize))>,
-    /// 是否正在通过鼠标拖拽进行选择
-    is_selecting: bool,
-    /// 上次渲染时的内容区域（不含边框），用于鼠标坐标换算
-    last_inner_area: Rect,
-
     pub streaming_text: String,
     pub streaming_reasoning: String,
     pub is_streaming: bool,
@@ -75,9 +68,6 @@ impl Default for ChatPanel {
             last_width: 0,
             cached_lines: Vec::new(),
             lines_dirty: true,
-            selection: None,
-            is_selecting: false,
-            last_inner_area: Rect::default(),
             streaming_text: String::new(),
             streaming_reasoning: String::new(),
             is_streaming: false,
@@ -192,115 +182,6 @@ impl ChatPanel {
     pub fn scroll_to_end(&mut self) {
         self.scroll_position = self.max_scroll();
         self.auto_follow = true;
-    }
-
-    /// 清除选择
-    pub fn clear_selection(&mut self) {
-        self.selection = None;
-    }
-
-    /// 处理鼠标事件以支持选择
-    pub fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
-        use crossterm::event::MouseEventKind;
-        let area = self.last_inner_area;
-        
-        // 滚轮事件
-        if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
-            match mouse.kind {
-                MouseEventKind::ScrollUp => self.scroll_by(-3),
-                MouseEventKind::ScrollDown => self.scroll_by(3),
-                _ => {}
-            }
-            return;
-        }
-
-        // 只有在面板区域内的点击才触发选择
-        if mouse.column < area.x || mouse.column >= area.x + area.width ||
-           mouse.row < area.y || mouse.row >= area.y + area.height {
-            if matches!(mouse.kind, MouseEventKind::Down(_)) {
-                self.clear_selection();
-            }
-            return;
-        }
-
-        let rel_x = (mouse.column - area.x) as usize;
-        let rel_y = (mouse.row - area.y) as usize;
-        let line_idx = self.scroll_position + rel_y;
-
-        if line_idx >= self.cached_lines.len() {
-            return;
-        }
-
-        // 计算字符索引
-        let char_idx = self.get_char_index_at(line_idx, rel_x);
-
-        match mouse.kind {
-            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                self.selection = Some(((line_idx, char_idx), (line_idx, char_idx)));
-                self.is_selecting = true;
-            }
-            MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-                if let Some((start, _)) = self.selection {
-                    self.selection = Some((start, (line_idx, char_idx)));
-                }
-            }
-            MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
-                self.is_selecting = false;
-                // 如果选择范围太小，视为点击清除
-                if let Some((s, e)) = self.selection {
-                    if s == e {
-                        self.clear_selection();
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn get_char_index_at(&self, line_idx: usize, x: usize) -> usize {
-        if line_idx >= self.cached_lines.len() { return 0; }
-        let line = &self.cached_lines[line_idx];
-        let mut current_width = 0;
-        let mut char_count = 0;
-        for span in &line.spans {
-            for ch in span.content.chars() {
-                let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                if current_width + w > x {
-                    return char_count;
-                }
-                current_width += w;
-                char_count += 1;
-            }
-        }
-        char_count
-    }
-
-    /// 获取选中的文本
-    pub fn get_selected_text(&self) -> Option<String> {
-        let ((s_line, s_char), (e_line, e_char)) = self.selection?;
-        let (start, end) = if (s_line, s_char) <= (e_line, e_char) {
-            ((s_line, s_char), (e_line, e_char))
-        } else {
-            ((e_line, e_char), (s_line, s_char))
-        };
-
-        let mut out = String::new();
-        for i in start.0..=end.0 {
-            if i >= self.cached_lines.len() { break; }
-            let line_text: String = self.cached_lines[i].spans.iter().map(|s| s.content.as_ref()).collect();
-            let chars: Vec<char> = line_text.chars().collect();
-            
-            let line_start = if i == start.0 { start.1 } else { 0 };
-            let line_end = if i == end.0 { end.1.min(chars.len()) } else { chars.len() };
-            
-            if line_start < chars.len() {
-                out.push_str(&chars[line_start..line_end].iter().collect::<String>());
-            }
-            if i < end.0 {
-                out.push('\n');
-            }
-        }
-        if out.is_empty() { None } else { Some(out) }
     }
 
     /// 当前最大可滚动行数
@@ -496,9 +377,8 @@ impl ChatPanel {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        // 缓存视口尺寸和区域
+        // 缓存视口尺寸
         self.visible_height = inner.height;
-        self.last_inner_area = inner;
 
         // 检测是否需要重建折行缓存（宽度变化或内容变化）
         if self.lines_dirty || self.last_width != inner.width {
@@ -526,16 +406,7 @@ impl ChatPanel {
         // 直接取切片渲染，不使用 Paragraph::wrap 和 scroll
         let start = self.scroll_position.min(total_lines.saturating_sub(1));
         let end = (start + visible).min(total_lines);
-        
-        let mut visible_lines = Vec::new();
-        for i in start..end {
-            let line = &self.cached_lines[i];
-            if let Some(sel) = self.selection {
-                visible_lines.push(self.apply_selection_to_line(line, i, sel));
-            } else {
-                visible_lines.push(line.clone());
-            }
-        }
+        let visible_lines: Vec<Line> = self.cached_lines[start..end].to_vec();
 
         let paragraph = Paragraph::new(visible_lines);
         frame.render_widget(paragraph, inner);
@@ -555,63 +426,6 @@ impl ChatPanel {
                 &mut scrollbar_state,
             );
         }
-    }
-
-    fn apply_selection_to_line(&self, line: &Line<'static>, line_idx: usize, selection: ((usize, usize), (usize, usize))) -> Line<'static> {
-        let (s, e) = if selection.0 <= selection.1 { (selection.0, selection.1) } else { (selection.1, selection.0) };
-        
-        // 如果行完全在选择范围外
-        if line_idx < s.0 || line_idx > e.0 {
-            return line.clone();
-        }
-
-        // 提取行文本并转为字符向量
-        let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        let chars: Vec<char> = line_text.chars().collect();
-        
-        // 计算本行的选择范围
-        let sel_start = if line_idx == s.0 { s.1 } else { 0 };
-        let sel_end = if line_idx == e.0 { e.1.min(chars.len()) } else { chars.len() };
-
-        if sel_start >= sel_end {
-            return line.clone();
-        }
-
-        // 重新构建 Spans
-        let mut new_spans = Vec::new();
-        let mut current_pos = 0;
-        let selection_style = Style::default().bg(Color::Rgb(60, 100, 150)).fg(Color::White);
-
-        for span in &line.spans {
-            let span_chars: Vec<char> = span.content.chars().collect();
-            let span_len = span_chars.len();
-            let span_end_pos = current_pos + span_len;
-
-            // 如果整个 span 都在选择范围内
-            if current_pos >= sel_start && span_end_pos <= sel_end {
-                new_spans.push(Span::styled(span.content.clone(), span.style.patch(selection_style)));
-            }
-            // 如果整个 span 都在选择范围外
-            else if span_end_pos <= sel_start || current_pos >= sel_end {
-                new_spans.push(span.clone());
-            }
-            // 部分重叠
-            else {
-                let overlap_start = sel_start.saturating_sub(current_pos).max(0);
-                let overlap_end = (sel_end - current_pos).min(span_len);
-
-                if overlap_start > 0 {
-                    new_spans.push(Span::styled(span_chars[0..overlap_start].iter().collect::<String>(), span.style));
-                }
-                new_spans.push(Span::styled(span_chars[overlap_start..overlap_end].iter().collect::<String>(), span.style.patch(selection_style)));
-                if overlap_end < span_len {
-                    new_spans.push(Span::styled(span_chars[overlap_end..].iter().collect::<String>(), span.style));
-                }
-            }
-            current_pos += span_len;
-        }
-
-        Line::from(new_spans)
     }
 }
 

@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
+use crossterm::event::{KeyCode, KeyModifiers};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -65,11 +65,11 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(project_dir: PathBuf, event_sender: tokio::sync::mpsc::UnboundedSender<AppEvent>) -> Self {
+    pub fn new(project_dir: PathBuf, event_sender: tokio::sync::mpsc::UnboundedSender<AppEvent>) -> anyhow::Result<Self> {
         let global_settings = GlobalSettings::load().unwrap_or_default();
         let project_config = ProjectConfig::load(&project_dir).unwrap_or_default();
 
-        let engine = Arc::new(Mutex::new(DbEngine::new(&project_dir).expect("无法初始化 DuckDB 引擎")));
+        let engine = Arc::new(Mutex::new(DbEngine::new(&project_dir)?));
         let llm = Arc::new(LlmClient::new(&global_settings));
         let show_reasoning = global_settings.show_reasoning;
 
@@ -90,7 +90,7 @@ impl App {
             data_files_count: 0,
         };
 
-        Self {
+        Ok(Self {
             running: true,
             focus: FocusArea::Input,
             view_mode: ViewMode::Chat,
@@ -110,7 +110,7 @@ impl App {
             llm,
             schemas: Vec::new(),
             event_sender,
-        }
+        })
     }
 
     /// 启动后台扫描任务
@@ -183,20 +183,7 @@ impl App {
                 // 通知 chat 面板视口大小变化，需要重建折行缓存
                 self.chat_panel.on_resize();
             }
-            AppEvent::Mouse(mouse) => {
-                // 鼠标事件统一交给 chat 面板处理（它内部会根据坐标判断是否处理选择或滚动）
-                self.chat_panel.handle_mouse(mouse);
-                
-                // 同时，如果是滚动且焦点在其他区域，也让其他区域滚动
-                if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
-                    let delta = if mouse.kind == MouseEventKind::ScrollUp { -3 } else { 3 };
-                    match self.focus {
-                        FocusArea::Table => { if delta < 0 { self.table_view.scroll_up(); } else { self.table_view.scroll_down(); } }
-                        FocusArea::Schema => { if delta < 0 { self.schema_panel.previous(); } else { self.schema_panel.next(); } }
-                        _ => {}
-                    }
-                }
-            }
+            AppEvent::Mouse(_) => {}
             AppEvent::Tick => {}
         }
     }
@@ -227,15 +214,7 @@ impl App {
         let text = match what {
             "sql" => self.chat_panel.last_sql().map(|s| s.to_string()),
             "reply" => self.chat_panel.last_reply().map(|s| s.to_string()),
-            "selection" => self.chat_panel.get_selected_text(),
-            _ => {
-                // 如果有选择，优先复制选择
-                if let Some(sel) = self.chat_panel.get_selected_text() {
-                    Some(sel)
-                } else {
-                    Some(self.chat_panel.full_text())
-                }
-            }
+            _ => Some(self.chat_panel.full_text()),
         };
 
         match text {
@@ -245,8 +224,7 @@ impl App {
                         let label = match what {
                             "sql" => "SQL 已复制到剪贴板",
                             "reply" => "最后一条回复已复制到剪贴板",
-                            "selection" => "已复制选中文本",
-                            _ => if self.chat_panel.get_selected_text().is_some() { "已复制选中文本" } else { "对话内容已复制到剪贴板" },
+                            _ => "对话内容已复制到剪贴板",
                         };
                         self.chat_panel.add_message(MessageRole::System, format!("📋 {}", label));
                     }
@@ -262,7 +240,6 @@ impl App {
                 let label = match what {
                     "sql" => "没有可复制的 SQL",
                     "reply" => "没有可复制的回复",
-                    "selection" => "当前没有选中文本",
                     _ => "没有可复制的内容",
                 };
                 self.chat_panel.add_message(MessageRole::System, label.to_string());
@@ -353,7 +330,7 @@ impl App {
                 "/split" => { self.view_mode = ViewMode::Split; return; }
                 "/help" => {
                     self.chat_panel.add_message(MessageRole::System,
-                        "可用命令:\n  /clear - 清空对话\n  /refresh - 刷新数据文件\n  /chat - 聊天视图\n  /table - 表格视图\n  /split - 分屏视图\n  /quit - 退出\n\n快捷键:\n  Tab - 切换焦点\n  F1/F2/F3 - 切换视图\n  F5 - 刷新数据\n  Esc - 退出\n\n🖱️ 鼠标交互 (直观模式):\n  滚轮 - 滚动面板内容\n  左键拖拽 - 直接选择文本 (高亮显示)\n  y - 复制选中的文本 (若无选择则复制全文)\n  s/r - 复制 SQL / 复制回复".to_string()
+                        "可用命令:\n  /clear - 清空对话\n  /refresh - 刷新数据文件\n  /chat - 聊天视图\n  /table - 表格视图\n  /split - 分屏视图\n  /quit - 退出\n\n快捷键:\n  Tab - 切换焦点\n  F1/F2/F3 - 切换视图\n  F5 - 刷新数据\n  Esc - 退出\n\n对话面板快捷键:\n  ↑/↓ - 逐行滚动\n  PgUp/PgDn - 翻页滚动\n  Home/End - 跳到顶部/底部\n  y - 复制全部对话\n  s - 复制最后一条 SQL\n  r - 复制最后一条回复\n\n🖱️ 鼠标交互:\n  支持原生选择 - 直接用鼠标划选文本即可进行复制".to_string()
                     );
                     return;
                 }
