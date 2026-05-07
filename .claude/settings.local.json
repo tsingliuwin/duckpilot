@@ -11,7 +11,12 @@
       "Bash(cargo build *)",
       "Bash(cargo check *)",
       "Bash(git checkout *)",
-      "Bash(git revert *)"
+      "Bash(git revert *)",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/Hmbown/DeepSeek-TUI/main/crates/tui/src/tui/selection.rs\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/Hmbown/DeepSeek-TUI/main/crates/tui/src/tui/clipboard.rs\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/Hmbown/DeepSeek-TUI/main/crates/tui/src/tui/app.rs\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/Hmbown/DeepSeek-TUI/main/crates/tui/src/tui/ui.rs\")",
+      "Bash(taskkill //F //IM duckpilot.exe)"
     ]
   }
 }

@@ -35,12 +35,14 @@ struct SelectionPoint {
 pub struct Selection {
     anchor: Option<SelectionPoint>,
     head: Option<SelectionPoint>,
+    dragging: bool,
 }
 
 impl Selection {
     fn clear(&mut self) {
         self.anchor = None;
         self.head = None;
+        self.dragging = false;
     }
 
     fn is_active(&self) -> bool {
@@ -56,6 +58,10 @@ impl Selection {
         } else {
             Some((a, h))
         }
+    }
+
+    fn has_content(&self) -> bool {
+        self.ordered().is_some_and(|(s, e)| s != e)
     }
 }
 
@@ -238,6 +244,7 @@ impl ChatPanel {
         let pt = SelectionPoint { line, col };
         self.selection.anchor = Some(pt);
         self.selection.head = Some(pt);
+        self.selection.dragging = true;
     }
 
     pub fn extend_selection(&mut self, line: usize, col: usize) {
@@ -252,6 +259,15 @@ impl ChatPanel {
 
     pub fn has_selection(&self) -> bool {
         self.selection.is_active()
+    }
+
+    pub fn is_dragging(&self) -> bool {
+        self.selection.dragging
+    }
+
+    /// 结束拖拽状态，保留选择可见
+    pub fn finish_drag(&mut self) {
+        self.selection.dragging = false;
     }
 
     /// 将显示列号转换为字符串的字符索引（安全处理多字节字符）

@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -453,28 +453,36 @@ impl App {
                     }
                 }
             }
-            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+            // 鼠标左键按下：开始选择（或在聊天面板外点击时清除已有选择）
+            MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(FocusArea::Chat) = self.panel_at(row, column) {
                     if let Some(area) = self.chat_panel_area {
                         let inner_y = row.saturating_sub(area.y + 1) as usize;
                         let inner_x = column.saturating_sub(area.x + 1) as usize;
                         self.chat_panel.start_selection(inner_y, inner_x);
                     }
+                } else if self.chat_panel.has_selection() {
+                    // 点击聊天面板外部，清除选择
+                    self.chat_panel.clear_selection();
                 }
             }
-            MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-                if let Some(area) = self.chat_panel_area {
-                    let inner_y = row.saturating_sub(area.y + 1) as usize;
-                    let inner_x = column.saturating_sub(area.x + 1) as usize;
-                    self.chat_panel.extend_selection(inner_y, inner_x);
+            // 鼠标拖拽：扩展选择
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.chat_panel.is_dragging() {
+                    if let Some(area) = self.chat_panel_area {
+                        let inner_y = row.saturating_sub(area.y + 1) as usize;
+                        let inner_x = column.saturating_sub(area.x + 1) as usize;
+                        self.chat_panel.extend_selection(inner_y, inner_x);
+                    }
                 }
             }
-            MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
-                if self.chat_panel.has_selection() {
+            // 鼠标松开：结束拖拽，复制到剪贴板，但保留选择可见
+            MouseEventKind::Up(MouseButton::Left) => {
+                if self.chat_panel.is_dragging() {
+                    self.chat_panel.finish_drag();
                     if let Some(text) = self.chat_panel.selected_text() {
                         let _ = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text));
                     }
-                    self.chat_panel.clear_selection();
                 }
             }
             _ => {}
