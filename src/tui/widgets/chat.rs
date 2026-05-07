@@ -23,6 +23,42 @@ pub struct ChatMessage {
     pub show_reasoning: bool,
 }
 
+/// 文本选择端点（视口内坐标）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SelectionPoint {
+    line: usize,
+    col: usize,
+}
+
+/// 文本选择状态
+#[derive(Debug, Clone, Default)]
+pub struct Selection {
+    anchor: Option<SelectionPoint>,
+    head: Option<SelectionPoint>,
+}
+
+impl Selection {
+    fn clear(&mut self) {
+        self.anchor = None;
+        self.head = None;
+    }
+
+    fn is_active(&self) -> bool {
+        self.anchor.is_some() && self.head.is_some()
+    }
+
+    /// 返回有序的 (start, end) 端点
+    fn ordered(&self) -> Option<(SelectionPoint, SelectionPoint)> {
+        let a = self.anchor?;
+        let h = self.head?;
+        if (h.line, h.col) < (a.line, a.col) {
+            Some((h, a))
+        } else {
+            Some((a, h))
+        }
+    }
+}
+
 /// 聊天面板状态
 ///
 /// 使用正向滚动模型：
@@ -42,6 +78,8 @@ pub struct ChatPanel {
     last_width: u16,
     /// 预折行后的全部行（缓存）
     cached_lines: Vec<Line<'static>>,
+    /// 每行对应的纯文本（用于选择复制）
+    plain_lines: Vec<String>,
     /// 内容是否发生了变化，需要重建缓存
     lines_dirty: bool,
 
@@ -49,6 +87,9 @@ pub struct ChatPanel {
     pub streaming_reasoning: String,
     pub is_streaming: bool,
     pub show_reasoning: bool,
+
+    /// 文本选择状态
+    selection: Selection,
 }
 
 impl Default for ChatPanel {
@@ -67,11 +108,13 @@ impl Default for ChatPanel {
             visible_height: 0,
             last_width: 0,
             cached_lines: Vec::new(),
+            plain_lines: Vec::new(),
             lines_dirty: true,
             streaming_text: String::new(),
             streaming_reasoning: String::new(),
             is_streaming: false,
             show_reasoning: true,
+            selection: Selection::default(),
         }
     }
 }
@@ -189,6 +232,70 @@ impl ChatPanel {
         self.cached_lines.len().saturating_sub(self.visible_height as usize)
     }
 
+    // ---- 文本选择 ----
+
+    pub fn start_selection(&mut self, line: usize, col: usize) {
+        let pt = SelectionPoint { line, col };
+        self.selection.anchor = Some(pt);
+        self.selection.head = Some(pt);
+    }
+
+    pub fn extend_selection(&mut self, line: usize, col: usize) {
+        if self.selection.anchor.is_some() {
+            self.selection.head = Some(SelectionPoint { line, col });
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.selection.is_active()
+    }
+
+    /// 将显示列号转换为字符串的字符索引（安全处理多字节字符）
+    fn display_col_to_char_idx(s: &str, col: usize) -> usize {
+        let mut width = 0usize;
+        for (i, ch) in s.char_indices() {
+            if width >= col {
+                return i;
+            }
+            width += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+        }
+        s.len()
+    }
+
+    /// 提取选中文本的纯文本内容
+    pub fn selected_text(&self) -> Option<String> {
+        let (start, end) = self.selection.ordered()?;
+        if start.line == end.line && start.col == end.col {
+            return None;
+        }
+        let mut out = String::new();
+        for i in start.line..=end.line.min(self.plain_lines.len().saturating_sub(1)) {
+            let line = &self.plain_lines[i];
+            if start.line == end.line && i == start.line {
+                let s = Self::display_col_to_char_idx(line, start.col);
+                let e = Self::display_col_to_char_idx(line, end.col);
+                if s < e {
+                    out.push_str(&line[s..e]);
+                }
+            } else if i == start.line {
+                let s = Self::display_col_to_char_idx(line, start.col);
+                out.push_str(&line[s..]);
+                out.push('\n');
+            } else if i == end.line {
+                let e = Self::display_col_to_char_idx(line, end.col);
+                out.push_str(&line[..e]);
+            } else {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        if out.is_empty() { None } else { Some(out) }
+    }
+
     // ---- 内容访问 ----
 
     /// 生成全部对话的纯文本
@@ -231,6 +338,7 @@ impl ChatPanel {
     fn rebuild_lines(&mut self, width: u16) {
         let w = width as usize;
         let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut plain: Vec<String> = Vec::new();
 
         for msg in &self.messages {
             let (prefix, style) = match msg.role {
@@ -249,6 +357,7 @@ impl ChatPanel {
             };
 
             // 角色标签行
+            let label = format!("{}  {}", prefix, msg.timestamp);
             lines.push(Line::from(vec![
                 Span::styled(prefix.to_string(), style),
                 Span::styled(
@@ -256,12 +365,13 @@ impl ChatPanel {
                     Style::default().fg(Color::DarkGray),
                 ),
             ]));
+            plain.push(label);
 
             // 消息内容（预折行）
             let content_style = Style::default().fg(Color::Rgb(220, 220, 220));
             for line in msg.content.lines() {
                 let prefixed = format!("    {}", line);
-                wrap_line_into(&prefixed, w, content_style, &mut lines);
+                wrap_line_into(&prefixed, w, content_style, &mut lines, &mut plain);
             }
 
             // 推理过程
@@ -271,20 +381,23 @@ impl ChatPanel {
                         "    ┌─ 💭 思考 ──────────────────".to_string(),
                         Style::default().fg(Color::Rgb(100, 100, 120)),
                     )));
+                    plain.push("    ┌─ 💭 思考 ──────────────────".to_string());
                     let r_style = Style::default().fg(Color::Rgb(120, 120, 150));
                     for rline in reasoning.lines() {
                         let prefixed = format!("    │ {}", rline);
-                        wrap_line_into(&prefixed, w, r_style, &mut lines);
+                        wrap_line_into(&prefixed, w, r_style, &mut lines, &mut plain);
                     }
                     lines.push(Line::from(Span::styled(
                         "    └───────────────────────────".to_string(),
                         Style::default().fg(Color::Rgb(100, 100, 120)),
                     )));
+                    plain.push("    └───────────────────────────".to_string());
                 } else if !reasoning.is_empty() {
                     lines.push(Line::from(Span::styled(
                         "    💭 思考过程已隐藏".to_string(),
                         Style::default().fg(Color::Rgb(80, 80, 100)),
                     )));
+                    plain.push("    💭 思考过程已隐藏".to_string());
                 }
             }
 
@@ -294,19 +407,22 @@ impl ChatPanel {
                     "    ┌─ SQL ──────────────────".to_string(),
                     Style::default().fg(Color::Rgb(150, 150, 150)),
                 )));
+                plain.push("    ┌─ SQL ──────────────────".to_string());
                 let sql_style = Style::default().fg(Color::Rgb(206, 147, 216));
                 for sql_line in sql.lines() {
                     let prefixed = format!("    │ {}", sql_line);
-                    wrap_line_into(&prefixed, w, sql_style, &mut lines);
+                    wrap_line_into(&prefixed, w, sql_style, &mut lines, &mut plain);
                 }
                 lines.push(Line::from(Span::styled(
                     "    └───────────────────────".to_string(),
                     Style::default().fg(Color::Rgb(150, 150, 150)),
                 )));
+                plain.push("    └───────────────────────".to_string());
             }
 
             // 消息间空行
             lines.push(Line::from("".to_string()));
+            plain.push(String::new());
         }
 
         // 流式输出中的文本
@@ -317,6 +433,7 @@ impl ChatPanel {
                 "  回答中..."
             };
 
+            let label = format!("  🛸 Pilot {}", status);
             lines.push(Line::from(vec![
                 Span::styled(
                     "  🛸 Pilot".to_string(),
@@ -324,39 +441,43 @@ impl ChatPanel {
                 ),
                 Span::styled(status.to_string(), Style::default().fg(Color::DarkGray)),
             ]));
+            plain.push(label);
             // 流式推理过程
             if !self.streaming_reasoning.is_empty() {
                 lines.push(Line::from(Span::styled(
                     "    ┌─ 💭 思考 ──────────────────".to_string(),
                     Style::default().fg(Color::Rgb(100, 100, 120)),
                 )));
+                plain.push("    ┌─ 💭 思考 ──────────────────".to_string());
                 let r_style = Style::default().fg(Color::Rgb(120, 120, 150));
                 for rline in self.streaming_reasoning.lines() {
                     let prefixed = format!("    │ {}", rline);
-                    wrap_line_into(&prefixed, w, r_style, &mut lines);
+                    wrap_line_into(&prefixed, w, r_style, &mut lines, &mut plain);
                 }
-                // 如果已经有正文了，推理过程可能还没显式结束，但我们可以给个视觉提示
                 if !self.streaming_text.is_empty() {
                     lines.push(Line::from(Span::styled(
                         "    └───────────────────────────".to_string(),
                         Style::default().fg(Color::Rgb(100, 100, 120)),
                     )));
+                    plain.push("    └───────────────────────────".to_string());
                 }
             }
             // 流式内容
             let content_style = Style::default().fg(Color::Rgb(220, 220, 220));
             for line in self.streaming_text.lines() {
                 let prefixed = format!("    {}", line);
-                wrap_line_into(&prefixed, w, content_style, &mut lines);
+                wrap_line_into(&prefixed, w, content_style, &mut lines, &mut plain);
             }
             // 闪烁光标效果
             lines.push(Line::from(Span::styled(
                 "    █".to_string(),
                 Style::default().fg(Color::Rgb(100, 149, 237)),
             )));
+            plain.push("    █".to_string());
         }
 
         self.cached_lines = lines;
+        self.plain_lines = plain;
         self.lines_dirty = false;
         self.last_width = width;
     }
@@ -384,11 +505,9 @@ impl ChatPanel {
         if self.lines_dirty || self.last_width != inner.width {
             let was_at_bottom = self.auto_follow;
             self.rebuild_lines(inner.width);
-            // 重建后，如果之前是跟随底部，保持在底部
             if was_at_bottom {
                 self.scroll_position = self.max_scroll();
             } else {
-                // 钳位 scroll_position，防止溢出
                 let max = self.max_scroll();
                 if self.scroll_position > max {
                     self.scroll_position = max;
@@ -403,10 +522,39 @@ impl ChatPanel {
             return;
         }
 
-        // 直接取切片渲染，不使用 Paragraph::wrap 和 scroll
         let start = self.scroll_position.min(total_lines.saturating_sub(1));
         let end = (start + visible).min(total_lines);
-        let visible_lines: Vec<Line> = self.cached_lines[start..end].to_vec();
+
+        // 如果有选择，给选中行添加高亮背景
+        let sel_range = self.selection.ordered().map(|(s, e)| (s.line, e.line));
+        let visible_lines: Vec<Line> = (start..end)
+            .map(|i| {
+                let line = &self.cached_lines[i];
+                if let Some((sel_start, sel_end)) = sel_range {
+                    if i >= sel_start && i <= sel_end {
+                        // 选中行：反转前景/背景色
+                        let highlighted: Vec<Span> = line
+                            .spans
+                            .iter()
+                            .map(|span| {
+                                let bg = span.style.fg.unwrap_or(Color::Rgb(220, 220, 220));
+                                Span::styled(
+                                    span.content.clone(),
+                                    Style::default()
+                                        .fg(bg)
+                                        .bg(Color::Rgb(60, 80, 120)),
+                                )
+                            })
+                            .collect();
+                        Line::from(highlighted)
+                    } else {
+                        line.clone()
+                    }
+                } else {
+                    line.clone()
+                }
+            })
+            .collect();
 
         let paragraph = Paragraph::new(visible_lines);
         frame.render_widget(paragraph, inner);
@@ -429,21 +577,21 @@ impl ChatPanel {
     }
 }
 
-/// 将一行文本按视口宽度预折行，结果追加到 `out`
-fn wrap_line_into(text: &str, max_width: usize, style: Style, out: &mut Vec<Line<'static>>) {
+/// 将一行文本按视口宽度预折行，结果追加到 `out`（styled lines）和 `plain_out`（纯文本）
+fn wrap_line_into(text: &str, max_width: usize, style: Style, out: &mut Vec<Line<'static>>, plain_out: &mut Vec<String>) {
     if max_width == 0 {
         out.push(Line::from(Span::styled(text.to_string(), style)));
+        plain_out.push(text.to_string());
         return;
     }
 
     let text_width = UnicodeWidthStr::width(text);
     if text_width <= max_width {
-        // 不需要折行
         out.push(Line::from(Span::styled(text.to_string(), style)));
+        plain_out.push(text.to_string());
         return;
     }
 
-    // 需要折行：按字符逐个累加宽度
     let mut current_line = String::new();
     let mut current_width: usize = 0;
 
@@ -451,8 +599,8 @@ fn wrap_line_into(text: &str, max_width: usize, style: Style, out: &mut Vec<Line
         let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
 
         if current_width + ch_width > max_width && !current_line.is_empty() {
-            // 当前行满了，输出并换行
             out.push(Line::from(Span::styled(current_line.clone(), style)));
+            plain_out.push(current_line.clone());
             current_line.clear();
             current_width = 0;
         }
@@ -461,8 +609,8 @@ fn wrap_line_into(text: &str, max_width: usize, style: Style, out: &mut Vec<Line
         current_width += ch_width;
     }
 
-    // 最后一段
     if !current_line.is_empty() {
-        out.push(Line::from(Span::styled(current_line, style)));
+        out.push(Line::from(Span::styled(current_line.clone(), style)));
+        plain_out.push(current_line);
     }
 }

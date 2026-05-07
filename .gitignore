@@ -6,3 +6,4 @@
 
 # MSVC Windows build artifacts
 *.pdb
+.claude

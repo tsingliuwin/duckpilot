@@ -36,11 +36,20 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     // Schema 面板
     app.schema_panel.focused = matches!(app.focus, FocusArea::Schema);
     app.schema_panel.render(frame, content_layout[0]);
+    app.schema_panel_area = Some(content_layout[0]);
 
     // 右侧面板（根据模式切换）
     match app.view_mode {
-        ViewMode::Chat => app.chat_panel.render(frame, content_layout[1]),
-        ViewMode::Table => app.table_view.render(frame, content_layout[1]),
+        ViewMode::Chat => {
+            app.chat_panel.render(frame, content_layout[1]);
+            app.chat_panel_area = Some(content_layout[1]);
+            app.table_view_area = None;
+        }
+        ViewMode::Table => {
+            app.table_view.render(frame, content_layout[1]);
+            app.chat_panel_area = None;
+            app.table_view_area = Some(content_layout[1]);
+        }
         ViewMode::Split => {
             let split = Layout::default()
                 .direction(Direction::Vertical)
@@ -48,12 +57,15 @@ pub fn render(app: &mut App, frame: &mut Frame) {
                 .split(content_layout[1]);
             app.chat_panel.render(frame, split[0]);
             app.table_view.render(frame, split[1]);
+            app.chat_panel_area = Some(split[0]);
+            app.table_view_area = Some(split[1]);
         }
     }
 
     // 输入框
     app.input_box.focused = matches!(app.focus, FocusArea::Input);
     app.input_box.render(frame, main_layout[2]);
+    app.input_box_area = Some(main_layout[2]);
 
     // 状态栏
     app.status_bar.render(frame, main_layout[3]);

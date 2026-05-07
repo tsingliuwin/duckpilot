@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -7,6 +7,7 @@ use crate::config::{GlobalSettings, ProjectConfig};
 use crate::engine::DbEngine;
 use crate::llm::LlmClient;
 use crate::tui::event::{AppEvent, EventHandler, TableSchema};
+use crate::tui::mouse::MouseScrollState;
 use crate::tui::terminal::TerminalManager;
 use crate::tui::widgets::{
     chat::{ChatPanel, MessageRole},
@@ -62,6 +63,15 @@ pub struct App {
 
     // 事件发送器（用于异步任务回传结果）
     pub event_sender: tokio::sync::mpsc::UnboundedSender<AppEvent>,
+
+    // 面板区域缓存（每次 render 时更新，用于鼠标坐标路由）
+    pub chat_panel_area: Option<ratatui::prelude::Rect>,
+    pub schema_panel_area: Option<ratatui::prelude::Rect>,
+    pub table_view_area: Option<ratatui::prelude::Rect>,
+    pub input_box_area: Option<ratatui::prelude::Rect>,
+
+    // 鼠标滚动状态
+    mouse_scroll: MouseScrollState,
 }
 
 impl App {
@@ -110,6 +120,11 @@ impl App {
             llm,
             schemas: Vec::new(),
             event_sender,
+            chat_panel_area: None,
+            schema_panel_area: None,
+            table_view_area: None,
+            input_box_area: None,
+            mouse_scroll: MouseScrollState::new(),
         })
     }
 
@@ -183,7 +198,7 @@ impl App {
                 // 通知 chat 面板视口大小变化，需要重建折行缓存
                 self.chat_panel.on_resize();
             }
-            AppEvent::Mouse(_) => {}
+            AppEvent::Mouse(mouse) => self.handle_mouse(mouse),
             AppEvent::Tick => {}
         }
     }
@@ -370,6 +385,100 @@ impl App {
                 }
             }
         });
+    }
+
+    /// 根据鼠标坐标判断命中的面板，路由滚动事件
+    fn panel_at(&self, row: u16, column: u16) -> Option<FocusArea> {
+        let areas = [
+            (self.schema_panel_area, FocusArea::Schema),
+            (self.chat_panel_area, FocusArea::Chat),
+            (self.table_view_area, FocusArea::Table),
+        ];
+        for (area, focus) in &areas {
+            if let Some(r) = area {
+                if row >= r.y && row < r.y + r.height && column >= r.x && column < r.x + r.width {
+                    return Some(focus.clone());
+                }
+            }
+        }
+        None
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        let (row, column) = (mouse.row, mouse.column);
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                let delta = self.mouse_scroll.on_scroll(crate::tui::mouse::ScrollDirection::Up);
+                if let Some(panel) = self.panel_at(row, column) {
+                    match panel {
+                        FocusArea::Chat => self.chat_panel.scroll_by(delta),
+                        FocusArea::Schema => {
+                            if delta < 0 {
+                                self.schema_panel.previous();
+                            } else {
+                                self.schema_panel.next();
+                            }
+                        }
+                        FocusArea::Table => {
+                            if delta < 0 {
+                                self.table_view.scroll_up();
+                            } else {
+                                self.table_view.scroll_down();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                let delta = self.mouse_scroll.on_scroll(crate::tui::mouse::ScrollDirection::Down);
+                if let Some(panel) = self.panel_at(row, column) {
+                    match panel {
+                        FocusArea::Chat => self.chat_panel.scroll_by(delta),
+                        FocusArea::Schema => {
+                            if delta < 0 {
+                                self.schema_panel.previous();
+                            } else {
+                                self.schema_panel.next();
+                            }
+                        }
+                        FocusArea::Table => {
+                            if delta < 0 {
+                                self.table_view.scroll_up();
+                            } else {
+                                self.table_view.scroll_down();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                if let Some(FocusArea::Chat) = self.panel_at(row, column) {
+                    if let Some(area) = self.chat_panel_area {
+                        let inner_y = row.saturating_sub(area.y + 1) as usize;
+                        let inner_x = column.saturating_sub(area.x + 1) as usize;
+                        self.chat_panel.start_selection(inner_y, inner_x);
+                    }
+                }
+            }
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                if let Some(area) = self.chat_panel_area {
+                    let inner_y = row.saturating_sub(area.y + 1) as usize;
+                    let inner_x = column.saturating_sub(area.x + 1) as usize;
+                    self.chat_panel.extend_selection(inner_y, inner_x);
+                }
+            }
+            MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                if self.chat_panel.has_selection() {
+                    if let Some(text) = self.chat_panel.selected_text() {
+                        let _ = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text));
+                    }
+                    self.chat_panel.clear_selection();
+                }
+            }
+            _ => {}
+        }
     }
 
     /// 运行 TUI 主循环
