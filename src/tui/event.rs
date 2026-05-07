@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 
 /// 应用事件类型
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum AppEvent {
     /// 键盘事件
     Key(KeyEvent),
@@ -16,6 +17,8 @@ pub enum AppEvent {
     Tick,
     /// LLM 流式输出片段
     LlmChunk(String),
+    /// LLM 推理思考片段
+    LlmReasoningChunk(String),
     /// LLM 输出完成
     LlmDone,
     /// LLM 错误
@@ -39,6 +42,7 @@ pub struct QueryResultData {
 
 /// 表 Schema 信息
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TableSchema {
     pub name: String,
     pub source_file: String,
@@ -48,6 +52,7 @@ pub struct TableSchema {
 
 /// 列信息
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ColumnInfo {
     pub name: String,
     pub data_type: String,

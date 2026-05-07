@@ -8,16 +8,37 @@ pub struct DbEngine {
 }
 
 impl DbEngine {
-    pub fn new() -> Result<Self> {
+    pub fn new(project_dir: &Path) -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         // 加载必要的扩展
-        conn.execute("INSTALL httpfs; LOAD httpfs;", [])?;
-        conn.execute("INSTALL icu; LOAD icu;", [])?;
-        conn.execute("INSTALL excel; LOAD excel;", [])?;
+        let extensions = vec!["httpfs", "icu", "spatial", "excel", "ducklake"];
+        for ext in extensions {
+            // 先尝试安装（如果已安装则跳过），然后加载
+            let _ = conn.execute(&format!("INSTALL {};", ext), []);
+            conn.execute(&format!("LOAD {};", ext), [])?;
+        }
+
+        // 初始化 DuckLake 目录
+        let dp_dir = project_dir.join(".duckpilot");
+        let lake_path = dp_dir.join("metadata.ducklake");
+        let data_path = dp_dir.join("metadata.ducklake.files");
+        
+        // 挂载 DuckLake Catalog
+        // 使用 TYPE ducklake 确保以 DuckLake 格式挂载
+        let attach_query = format!(
+            "ATTACH 'ducklake:{}' AS lake (DATA_PATH '{}')",
+            lake_path.to_string_lossy(),
+            data_path.to_string_lossy()
+        );
+        conn.execute(&attach_query, [])?;
+        
+        // 默认切换到 lake 数据库，这样创建的表都会在 DuckLake 中
+        conn.execute("USE lake", [])?;
+
         Ok(Self { conn })
     }
 
-    /// 扫描目录并注册数据文件为视图
+    /// 扫描目录并注册数据文件为 DuckLake 表
     pub fn scan_and_register_files(&self, data_dir: &Path) -> Result<Vec<TableSchema>> {
         let mut schemas = Vec::new();
 
@@ -33,14 +54,27 @@ impl DbEngine {
                     let ext = ext.to_lowercase();
                     let file_path = path.to_string_lossy();
                     
-                    let query = match ext.as_str() {
-                        "csv" => format!("CREATE OR REPLACE VIEW \"{}\" AS SELECT * FROM read_csv_auto('{}')", table_name, file_path),
-                        "parquet" => format!("CREATE OR REPLACE VIEW \"{}\" AS SELECT * FROM read_parquet('{}')", table_name, file_path),
-                        "xlsx" | "xls" => format!("CREATE OR REPLACE VIEW \"{}\" AS SELECT * FROM st_read('{}')", table_name, file_path),
+                    let source_fn = match ext.as_str() {
+                        "csv" => format!("read_csv_auto('{}')", file_path),
+                        "parquet" => format!("read_parquet('{}')", file_path),
+                        "xlsx" => format!("read_xlsx('{}')", file_path),
+                        "xls" => format!("read_xlsx('{}')", file_path),
                         _ => continue,
                     };
 
-                    self.conn.execute(&query, [])?;
+                    // 将各种格式的数据转换为 DuckLake 表
+                    // 使用 CREATE TABLE IF NOT EXISTS ... AS SELECT * FROM ...
+                    let query = format!("CREATE TABLE IF NOT EXISTS \"{}\" AS SELECT * FROM {}", table_name, source_fn);
+
+                    match self.conn.execute(&query, []) {
+                        Ok(_) => {},
+                        Err(e) => {
+                            // 如果表已存在但结构不同，可能需要处理，这里暂时跳过
+                            if !e.to_string().contains("already exists") {
+                                return Err(e.into());
+                            }
+                        }
+                    }
                     
                     // 获取 Schema
                     let schema = self.get_table_schema(table_name, &file_path)?;

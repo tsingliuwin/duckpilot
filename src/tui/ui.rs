@@ -1,10 +1,6 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use super::widgets::{
-    chat::MessageRole,
-    status_bar::StatusBarData,
-};
 use crate::app::{App, FocusArea, ViewMode};
 /// 主界面渲染
 pub fn render(app: &mut App, frame: &mut Frame) {

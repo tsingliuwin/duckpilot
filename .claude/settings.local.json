@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(cargo run *)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d.get\\('api_key',''\\)[:8]+'...'\\)\")",
+      "Bash(python -c 'import json; print\\(json.load\\(open\\('\\\\''__TRACKED_VAR__/.duckpilot/settings.json'\\\\''\\)\\)['\\\\''api_key'\\\\'']\\)')",
+      "Bash(curl -s -o /dev/null -w 'HTTP %{http_code} %{method} %{url_effective}\\\\n' -X POST https://coding.dashscope.aliyuncs.com/v1/chat/completions -H 'Authorization: Bearer __TRACKED_VAR__' -H 'Content-Type: application/json' -d '{\"model\":\"glm-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":true,\"max_tokens\":5}')",
+      "Bash(python -c \"import json; print\\(json.load\\(open\\(r'C:\\\\Users\\\\lyq\\\\.duckpilot\\\\settings.json'\\)\\)['api_key']\\)\")",
+      "Bash(curl -s -w '\\\\nHTTP %{http_code}' -X POST https://coding.dashscope.aliyuncs.com/v1/chat/completions -H 'Authorization: Bearer __TRACKED_VAR__' -H 'Content-Type: application/json' -d '{\"model\":\"glm-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":true,\"max_tokens\":5}')",
+      "Bash(cargo build *)",
+      "Bash(cargo check *)"
+    ]
+  }
+}

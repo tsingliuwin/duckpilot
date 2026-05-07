@@ -1,78 +1,99 @@
 use anyhow::Result;
-use async_openai::{
-    types::{
-        ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-        CreateChatCompletionRequestArgs,
-    },
-    Client,
-};
 use futures::StreamExt;
 use crate::config::GlobalSettings;
 use crate::tui::event::TableSchema;
 
 pub struct LlmClient {
-    client: Client<async_openai::config::OpenAIConfig>,
     model: String,
+    api_key: String,
+    api_base: String,
 }
 
 impl LlmClient {
     pub fn new(settings: &GlobalSettings) -> Self {
-        let config = async_openai::config::OpenAIConfig::new()
-            .with_api_key(&settings.api_key)
-            .with_api_base(&settings.api_base);
-        
-        let client = Client::with_config(config);
-        
         Self {
-            client,
             model: settings.model.clone(),
+            api_key: settings.api_key.clone(),
+            api_base: settings.api_base.clone(),
         }
     }
 
+    /// 流式请求 LLM，分别回调 content 和 reasoning_content
     pub async fn ask_sql_stream(
         &self,
         question: &str,
         schemas: &[TableSchema],
-        callback: impl Fn(String),
-    ) -> Result<String> {
-        let system_prompt = self.build_system_prompt(schemas);
-        
-        let request = CreateChatCompletionRequestArgs::default()
-            .model(&self.model)
-            .messages([
-                ChatCompletionRequestSystemMessageArgs::default()
-                    .content(system_prompt)
-                    .build()?
-                    .into(),
-                ChatCompletionRequestUserMessageArgs::default()
-                    .content(question)
-                    .build()?
-                    .into(),
-            ])
-            .stream(true)
-            .build()?;
+        content_callback: impl Fn(String),
+        reasoning_callback: impl Fn(String),
+    ) -> Result<(String, String)> {
+        let system_prompt = Self::build_system_prompt(schemas);
 
-        let mut stream = self.client.chat().create_stream(request).await?;
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": question}
+            ],
+            "stream": true
+        });
+
+        let url = format!("{}/chat/completions", self.api_base.trim_end_matches('/'));
+
+        let response = reqwest::Client::new()
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("API error {}: {}", status, text);
+        }
+
         let mut full_content = String::new();
+        let mut full_reasoning = String::new();
+        let mut buffer = String::new();
 
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(response) => {
-                    for chat_choice in response.choices {
-                        if let Some(ref content) = chat_choice.delta.content {
-                            full_content.push_str(content);
-                            callback(content.clone());
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(pos) = buffer.find('\n') {
+                let line = buffer[..pos].trim_end().to_string();
+                buffer = buffer[pos + 1..].to_string();
+
+                if let Some(data) = line.strip_prefix("data: ") {
+                    if data == "[DONE]" {
+                        break;
+                    }
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) {
+                        if let Some(delta) = parsed["choices"].get(0).and_then(|c| c.get("delta")) {
+                            if let Some(r) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+                                if !r.is_empty() {
+                                    full_reasoning.push_str(r);
+                                    reasoning_callback(r.to_string());
+                                }
+                            }
+                            if let Some(c) = delta.get("content").and_then(|v| v.as_str()) {
+                                if !c.is_empty() {
+                                    full_content.push_str(c);
+                                    content_callback(c.to_string());
+                                }
+                            }
                         }
                     }
                 }
-                Err(err) => return Err(anyhow::anyhow!("OpenAI error: {}", err)),
             }
         }
 
-        Ok(full_content)
+        Ok((full_content, full_reasoning))
     }
 
-    fn build_system_prompt(&self, schemas: &[TableSchema]) -> String {
+    fn build_system_prompt(schemas: &[TableSchema]) -> String {
         let mut prompt = String::from(
             "你是一个专业的 SQL 生成助手，专门为 DuckDB 编写 SQL。\n\
             请根据提供的表结构，将用户的自然语言问题转换为合法的 DuckDB SQL 语句。\n\n\

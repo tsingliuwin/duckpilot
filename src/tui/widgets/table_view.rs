@@ -22,8 +22,6 @@ impl TableView {
         self.selected_row = 0;
     }
 
-    pub fn clear(&mut self) { self.data = None; }
-
     pub fn scroll_up(&mut self) { self.selected_row = self.selected_row.saturating_sub(1); }
 
     pub fn scroll_down(&mut self) {

@@ -23,6 +23,10 @@ pub struct GlobalSettings {
     /// 温度参数（0.0-2.0）
     #[serde(default = "default_temperature")]
     pub temperature: f32,
+
+    /// 是否显示推理模型的思考过程
+    #[serde(default = "default_show_reasoning")]
+    pub show_reasoning: bool,
 }
 
 fn default_api_base() -> String {
@@ -41,6 +45,10 @@ fn default_temperature() -> f32 {
     0.0
 }
 
+fn default_show_reasoning() -> bool {
+    true
+}
+
 impl Default for GlobalSettings {
     fn default() -> Self {
         Self {
@@ -49,6 +57,7 @@ impl Default for GlobalSettings {
             model: default_model(),
             max_threads: default_max_threads(),
             temperature: default_temperature(),
+            show_reasoning: default_show_reasoning(),
         }
     }
 }

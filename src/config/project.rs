@@ -93,6 +93,7 @@ impl ProjectConfig {
     }
 
     /// 检查指定目录是否已初始化为 DuckPilot 项目
+    #[allow(dead_code)]
     pub fn is_initialized(project_root: &Path) -> bool {
         Self::duckpilot_dir(project_root).exists()
     }

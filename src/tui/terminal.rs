@@ -19,6 +19,7 @@ impl TerminalManager {
             original_hook(panic_info);
         }));
 
+        // 不启用鼠标捕获，保留终端原生的文本选择和 Ctrl+C 复制能力
         enable_raw_mode()?;
         execute!(stdout(), EnterAlternateScreen)?;
 

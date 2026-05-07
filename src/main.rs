@@ -17,8 +17,15 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // 解析项目目录
-    let project_dir = std::fs::canonicalize(&cli.project_dir)?;
+    // 处理项目目录：如果目录不存在且不是 init 命令，则报错
+    let project_dir = if cli.project_dir.exists() {
+        std::fs::canonicalize(&cli.project_dir)?
+    } else {
+        if !matches!(cli.command, Commands::Init) {
+            anyhow::bail!("项目目录不存在: {:?}。请先运行 init 命令初始化。", cli.project_dir);
+        }
+        cli.project_dir.clone()
+    };
 
     match cli.command {
         Commands::Init => cmd_init(&project_dir).await?,
@@ -128,6 +135,16 @@ async fn cmd_config_setup() -> Result<()> {
         settings.model = input.to_string();
     }
 
+    println!("显示推理过程 y/n (当前: {}):", if settings.show_reasoning { "y" } else { "n" });
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let input = input.trim().to_lowercase();
+    if input == "n" || input == "no" {
+        settings.show_reasoning = false;
+    } else if !input.is_empty() {
+        settings.show_reasoning = true;
+    }
+
     settings.save()?;
     println!("\n✅ 配置已保存到 {:?}", config::GlobalSettings::config_path()?);
     Ok(())
@@ -142,6 +159,7 @@ fn cmd_config_show() -> Result<()> {
     println!("  模型:     {}", settings.model);
     println!("  线程数:   {}", settings.max_threads);
     println!("  温度:     {}", settings.temperature);
+    println!("  显示推理: {}", if settings.show_reasoning { "是" } else { "否" });
     println!("\n  配置文件: {:?}", config::GlobalSettings::config_path()?);
     Ok(())
 }

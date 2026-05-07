@@ -11,7 +11,6 @@ pub struct StatusBarData {
     pub model_name: String,
     pub project_name: String,
     pub data_files_count: usize,
-    pub mode: String,
 }
 
 impl Default for StatusBarData {
@@ -22,7 +21,6 @@ impl Default for StatusBarData {
             model_name: "gpt-4o".to_string(),
             project_name: "未初始化".to_string(),
             data_files_count: 0,
-            mode: "Chat".to_string(),
         }
     }
 }

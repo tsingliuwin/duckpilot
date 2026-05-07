@@ -48,7 +48,9 @@ pub struct App {
     pub status_bar: StatusBarData,
 
     // 配置
+    #[allow(dead_code)]
     pub global_settings: GlobalSettings,
+    #[allow(dead_code)]
     pub project_config: ProjectConfig,
 
     // 引擎与 LLM
@@ -67,8 +69,9 @@ impl App {
         let global_settings = GlobalSettings::load().unwrap_or_default();
         let project_config = ProjectConfig::load(&project_dir).unwrap_or_default();
 
-        let engine = Arc::new(Mutex::new(DbEngine::new().expect("无法初始化 DuckDB 引擎")));
+        let engine = Arc::new(Mutex::new(DbEngine::new(&project_dir).expect("无法初始化 DuckDB 引擎")));
         let llm = Arc::new(LlmClient::new(&global_settings));
+        let show_reasoning = global_settings.show_reasoning;
 
         let project_name = if project_config.name.is_empty() {
             project_dir.file_name()
@@ -85,7 +88,6 @@ impl App {
             model_name: global_settings.model.clone(),
             project_name,
             data_files_count: 0,
-            mode: "Chat".to_string(),
         };
 
         Self {
@@ -93,7 +95,11 @@ impl App {
             focus: FocusArea::Input,
             view_mode: ViewMode::Chat,
             project_dir,
-            chat_panel: ChatPanel::default(),
+            chat_panel: {
+                let mut panel = ChatPanel::default();
+                panel.show_reasoning = show_reasoning;
+                panel
+            },
             input_box: InputBox::default(),
             schema_panel: SchemaPanel::default(),
             table_view: TableView::default(),
@@ -133,6 +139,9 @@ impl App {
             AppEvent::Key(key) => self.handle_key(key),
             AppEvent::LlmChunk(chunk) => {
                 self.chat_panel.append_streaming(&chunk);
+            }
+            AppEvent::LlmReasoningChunk(chunk) => {
+                self.chat_panel.append_reasoning(&chunk);
             }
             AppEvent::LlmDone => {
                 self.chat_panel.finish_streaming();
@@ -196,6 +205,48 @@ impl App {
         });
     }
 
+    fn refresh_data(&mut self) {
+        self.chat_panel.add_message(MessageRole::System, "🔄 正在重新扫描 data/ 目录并刷新表结构...".to_string());
+        self.start_scanning();
+    }
+
+    fn copy_chat_content(&mut self, what: &str) {
+        let text = match what {
+            "sql" => self.chat_panel.last_sql().map(|s| s.to_string()),
+            "reply" => self.chat_panel.last_reply().map(|s| s.to_string()),
+            _ => Some(self.chat_panel.full_text()),
+        };
+
+        match text {
+            Some(content) if !content.is_empty() => {
+                match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&content)) {
+                    Ok(()) => {
+                        let label = match what {
+                            "sql" => "SQL 已复制到剪贴板",
+                            "reply" => "最后一条回复已复制到剪贴板",
+                            _ => "对话内容已复制到剪贴板",
+                        };
+                        self.chat_panel.add_message(MessageRole::System, format!("📋 {}", label));
+                    }
+                    Err(e) => {
+                        self.chat_panel.add_message(
+                            MessageRole::System,
+                            format!("❌ 复制失败: {}", e),
+                        );
+                    }
+                }
+            }
+            _ => {
+                let label = match what {
+                    "sql" => "没有可复制的 SQL",
+                    "reply" => "没有可复制的回复",
+                    _ => "没有可复制的内容",
+                };
+                self.chat_panel.add_message(MessageRole::System, label.to_string());
+            }
+        }
+    }
+
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         // 全局快捷键
         match (key.code, key.modifiers) {
@@ -228,6 +279,7 @@ impl App {
             (KeyCode::F(1), _) => { self.view_mode = ViewMode::Chat; return; }
             (KeyCode::F(2), _) => { self.view_mode = ViewMode::Table; return; }
             (KeyCode::F(3), _) => { self.view_mode = ViewMode::Split; return; }
+            (KeyCode::F(5), _) => { self.refresh_data(); return; }
             _ => {}
         }
 
@@ -241,6 +293,13 @@ impl App {
             FocusArea::Chat => match key.code {
                 KeyCode::Up => self.chat_panel.scroll_up(),
                 KeyCode::Down => self.chat_panel.scroll_down(),
+                KeyCode::PageUp => self.chat_panel.page_up(20),
+                KeyCode::PageDown => self.chat_panel.page_down(20),
+                KeyCode::Home => self.chat_panel.scroll_to_top(),
+                KeyCode::End => self.chat_panel.scroll_to_end(),
+                KeyCode::Char('y') => self.copy_chat_content("all"),
+                KeyCode::Char('s') => self.copy_chat_content("sql"),
+                KeyCode::Char('r') => self.copy_chat_content("reply"),
                 _ => {}
             },
             FocusArea::Schema => match key.code {
@@ -265,12 +324,13 @@ impl App {
             match trimmed {
                 "/quit" | "/exit" | "/q" => { self.running = false; return; }
                 "/clear" => { self.chat_panel = ChatPanel::default(); return; }
+                "/refresh" | "/r" => { self.refresh_data(); return; }
                 "/chat" => { self.view_mode = ViewMode::Chat; return; }
                 "/table" => { self.view_mode = ViewMode::Table; return; }
                 "/split" => { self.view_mode = ViewMode::Split; return; }
                 "/help" => {
                     self.chat_panel.add_message(MessageRole::System,
-                        "可用命令:\n  /clear - 清空对话\n  /chat - 聊天视图\n  /table - 表格视图\n  /split - 分屏视图\n  /quit - 退出\n\n快捷键:\n  Tab - 切换焦点\n  F1/F2/F3 - 切换视图\n  Esc - 退出".to_string()
+                        "可用命令:\n  /clear - 清空对话\n  /refresh - 刷新数据文件\n  /chat - 聊天视图\n  /table - 表格视图\n  /split - 分屏视图\n  /quit - 退出\n\n快捷键:\n  Tab - 切换焦点\n  F1/F2/F3 - 切换视图\n  F5 - 刷新数据\n  Esc - 退出\n\n对话面板快捷键:\n  ↑/↓ - 逐行滚动\n  PgUp/PgDn - 翻页滚动\n  Home/End - 跳到顶部/底部\n  y - 复制全部对话\n  s - 复制最后一条 SQL\n  r - 复制最后一条回复\n\n提示: 可直接用鼠标选中文本，Ctrl+C 复制".to_string()
                     );
                     return;
                 }
@@ -293,11 +353,15 @@ impl App {
         let question = input;
 
         tokio::spawn(async move {
-            let callback = |chunk: String| {
+            let tx_reasoning = tx.clone();
+            let content_callback = |chunk: String| {
                 let _ = tx.send(AppEvent::LlmChunk(chunk));
             };
+            let reasoning_callback = move |chunk: String| {
+                let _ = tx_reasoning.send(AppEvent::LlmReasoningChunk(chunk));
+            };
 
-            match llm.ask_sql_stream(&question, &schemas, callback).await {
+            match llm.ask_sql_stream(&question, &schemas, content_callback, reasoning_callback).await {
                 Ok(_) => {
                     let _ = tx.send(AppEvent::LlmDone);
                 }
