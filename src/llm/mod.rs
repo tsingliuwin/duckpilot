@@ -1,7 +1,7 @@
 use anyhow::Result;
 use futures::StreamExt;
 use crate::config::GlobalSettings;
-use crate::tui::event::TableSchema;
+use crate::models::TableSchema;
 
 pub struct LlmClient {
     model: String,
