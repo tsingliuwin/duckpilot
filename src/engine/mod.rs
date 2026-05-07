@@ -1,7 +1,7 @@
 use anyhow::Result;
 use duckdb::Connection;
 use std::path::Path;
-use crate::models::{QueryResultData, TableSchema, ColumnInfo};
+use crate::tui::event::{QueryResultData, TableSchema, ColumnInfo};
 
 pub struct DbEngine {
     conn: Connection,

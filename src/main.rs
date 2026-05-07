@@ -1,18 +1,14 @@
+mod app;
 mod cli;
 mod config;
 mod engine;
 mod llm;
-mod models;
+mod tui;
 
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands, ConfigAction};
-use colored::*;
-use comfy_table::Table;
-use rustyline::error::ReadlineError;
-use rustyline::DefaultEditor;
-use std::io::{self, Write};
-use std::path::Path;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -46,7 +42,7 @@ async fn main() -> Result<()> {
 
 /// 初始化项目空间
 async fn cmd_init(project_dir: &std::path::Path) -> Result<()> {
-    println!("{}", "🛸 DuckPilot - 正在初始化项目空间...\n".cyan().bold());
+    println!("🛸 DuckPilot - 正在初始化项目空间...\n");
     println!("📁 项目目录: {}", project_dir.display());
 
     // 创建 .duckpilot 目录结构
@@ -87,148 +83,19 @@ async fn cmd_init(project_dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// 启动交互式 REPL 聊天
+/// 启动交互式 TUI 聊天
 async fn cmd_chat(project_dir: &std::path::Path) -> Result<()> {
-    println!("{}", "\n🛸 DuckPilot - 智能数据分析对话".cyan().bold());
-    println!("📁 项目: {}", project_dir.display());
-    println!("输入 {} 退出，输入 {} 获取帮助\n", "/exit".yellow(), "/help".yellow());
-
-    // 初始化引擎
-    let engine = engine::DbEngine::new(project_dir)?;
-    let settings = config::GlobalSettings::load()?;
-    let llm = llm::LlmClient::new(&settings);
-
-    // 初始扫描数据
-    println!("{}", "🔄 正在扫描数据文件...".dimmed());
-    let data_dir = project_dir.join("data");
-    let schemas = engine.scan_and_register_files(&data_dir)?;
-    println!("✅ 已注册 {} 个表结构\n", schemas.len());
-
-    let mut rl = DefaultEditor::new()?;
-    let history_path = project_dir.join(".duckpilot").join("history.txt");
-    if history_path.exists() {
-        let _ = rl.load_history(&history_path);
-    }
-
-    loop {
-        let readline = rl.readline(&"duckpilot > ".green().bold().to_string());
-        match readline {
-            Ok(line) => {
-                let trimmed = line.trim();
-                if trimmed.is_empty() { continue; }
-                
-                let _ = rl.add_history_entry(trimmed);
-
-                // 处理命令
-                if trimmed.starts_with('/') {
-                    match trimmed {
-                        "/exit" | "/quit" | "/q" => break,
-                        "/help" => {
-                            println!("\n可用命令:");
-                            println!("  /help    - 显示此帮助");
-                            println!("  /clear   - 清屏");
-                            println!("  /refresh - 重新扫描数据文件");
-                            println!("  /exit    - 退出\n");
-                            continue;
-                        }
-                        "/clear" => {
-                            print!("\x1B[2J\x1B[1;1H");
-                            let _ = io::stdout().flush();
-                            continue;
-                        }
-                        "/refresh" => {
-                            println!("{}", "🔄 正在重新扫描数据文件...".dimmed());
-                            let _ = engine.scan_and_register_files(&data_dir);
-                            println!("✅ 刷新完成\n");
-                            continue;
-                        }
-                        _ => {
-                            println!("未知命令: {}", trimmed.red());
-                            continue;
-                        }
-                    }
-                }
-
-                // 处理 Agent 逻辑
-                if let Err(e) = handle_agent_query(trimmed, &llm, &engine, &schemas).await {
-                    println!("\n{} {}", "❌ 错误:".red().bold(), e);
-                }
-                println!();
-            }
-            Err(ReadlineError::Interrupted) => {
-                println!("Interrupted");
-                break;
-            }
-            Err(ReadlineError::Eof) => {
-                println!("EOF");
-                break;
-            }
-            Err(err) => {
-                println!("Error: {:?}", err);
-                break;
-            }
-        }
-    }
-
-    let _ = rl.save_history(&history_path);
+    let mut events = tui::event::EventHandler::new(Duration::from_millis(250));
+    let mut app = app::App::new(project_dir.to_path_buf(), events.sender.clone())?;
+    
+    // 启动后台扫描
+    app.start_scanning();
+    
+    app.run(&mut events).await?;
     Ok(())
 }
 
-/// 处理智能体查询逻辑
-async fn handle_agent_query(
-    question: &str,
-    llm: &llm::LlmClient,
-    engine: &engine::DbEngine,
-    schemas: &[models::TableSchema],
-) -> Result<()> {
-    println!("\n{}", "💭 思考过程:".dimmed());
-    
-    // 1. 请求 LLM
-    let (content, _) = llm.ask_sql_stream(
-        question,
-        schemas,
-        |chunk| {
-            print!("{}", chunk);
-            let _ = io::stdout().flush();
-        },
-        |reasoning| {
-            print!("{}", reasoning.dimmed());
-            let _ = io::stdout().flush();
-        }
-    ).await?;
-    
-    println!("\n");
-
-    // 2. 提取并执行 SQL
-    let sql = llm::LlmClient::extract_sql(&content);
-    if !sql.is_empty() && !sql.starts_with("--") {
-        println!("{}", "📊 执行 SQL:".blue().bold());
-        println!("{}\n", sql.cyan());
-
-        match engine.execute_query(&sql) {
-            Ok(data) => {
-                if data.rows.is_empty() {
-                    println!("{}", "查询结果为空".yellow());
-                } else {
-                    let mut table = Table::new();
-                    table.set_header(data.columns);
-                    for row in data.rows {
-                        table.add_row(row);
-                    }
-                    println!("{}", table);
-                    println!("{}", format!("\n共 {} 行，耗时 {}ms", data.row_count, data.execution_time_ms).dimmed());
-                }
-            }
-            Err(e) => {
-                println!("{} {}", "❌ SQL 执行失败:".red().bold(), e);
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// 数据清洗模式 (暂存)
+/// 数据清洗模式
 async fn cmd_clean(project_dir: &std::path::Path) -> Result<()> {
     println!("🛸 DuckPilot - 数据清洗模式");
     println!("📁 项目: {}", project_dir.display());
@@ -242,6 +109,7 @@ async fn cmd_config_setup() -> Result<()> {
 
     let mut settings = config::GlobalSettings::load()?;
 
+    // 简单的标准输入读取
     println!("请输入 OpenAI API Key (当前: {}):", 
         if settings.api_key.is_empty() { "未设置" } else { "已设置" });
     let mut input = String::new();
@@ -267,6 +135,16 @@ async fn cmd_config_setup() -> Result<()> {
         settings.model = input.to_string();
     }
 
+    println!("显示推理过程 y/n (当前: {}):", if settings.show_reasoning { "y" } else { "n" });
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let input = input.trim().to_lowercase();
+    if input == "n" || input == "no" {
+        settings.show_reasoning = false;
+    } else if !input.is_empty() {
+        settings.show_reasoning = true;
+    }
+
     settings.save()?;
     println!("\n✅ 配置已保存到 {:?}", config::GlobalSettings::config_path()?);
     Ok(())
@@ -281,6 +159,7 @@ fn cmd_config_show() -> Result<()> {
     println!("  模型:     {}", settings.model);
     println!("  线程数:   {}", settings.max_threads);
     println!("  温度:     {}", settings.temperature);
+    println!("  显示推理: {}", if settings.show_reasoning { "是" } else { "否" });
     println!("\n  配置文件: {:?}", config::GlobalSettings::config_path()?);
     Ok(())
 }
