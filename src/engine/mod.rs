@@ -139,43 +139,41 @@ impl DbEngine {
     pub fn execute_query(&self, sql: &str) -> Result<QueryResultData> {
         let start = std::time::Instant::now();
         let mut stmt = self.conn.prepare(sql)?;
-        
-        // column_count() 在执行前调用通常是安全的
-        let col_count = stmt.column_count();
-        
-        let mut rows = Vec::new();
-        {
-            let mut query_rows = stmt.query([])?;
-            while let Some(row) = query_rows.next()? {
-                let mut row_data = Vec::new();
-                for i in 0..col_count {
-                    let val: duckdb::types::Value = row.get(i)?;
-                    let val_str = match val {
-                        duckdb::types::Value::Null => "NULL".to_string(),
-                        duckdb::types::Value::Boolean(b) => b.to_string(),
-                        duckdb::types::Value::TinyInt(i) => i.to_string(),
-                        duckdb::types::Value::SmallInt(i) => i.to_string(),
-                        duckdb::types::Value::Int(i) => i.to_string(),
-                        duckdb::types::Value::BigInt(i) => i.to_string(),
-                        duckdb::types::Value::HugeInt(i) => i.to_string(),
-                        duckdb::types::Value::Float(f) => f.to_string(),
-                        duckdb::types::Value::Double(f) => f.to_string(),
-                        duckdb::types::Value::Text(t) => t,
-                        duckdb::types::Value::Blob(b) => format!("<blob {} bytes>", b.len()),
-                        _ => format!("{:?}", val),
-                    };
-                    row_data.push(val_str);
-                }
-                rows.push(row_data);
-            }
-        }
-        // query_rows 已被 drop，stmt 的借用已释放，且 executed 标志已设为 true
-        
-        let mut columns = Vec::new();
-        if col_count > 0 {
+
+        // execute() 让 statement 进入 executed 状态，这样才能获取 schema
+        stmt.raw_execute()?;
+        let schema = stmt.schema();
+        let columns: Vec<String> = schema
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        let col_count = columns.len();
+
+        // raw_query() 读取已执行的结果
+        let mut query_rows = stmt.raw_query();
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        while let Some(row) = query_rows.next()? {
+            let mut row_data = Vec::new();
             for i in 0..col_count {
-                columns.push(stmt.column_name(i)?.to_string());
+                let val: duckdb::types::Value = row.get(i)?;
+                let val_str = match val {
+                    duckdb::types::Value::Null => "NULL".to_string(),
+                    duckdb::types::Value::Boolean(b) => b.to_string(),
+                    duckdb::types::Value::TinyInt(i) => i.to_string(),
+                    duckdb::types::Value::SmallInt(i) => i.to_string(),
+                    duckdb::types::Value::Int(i) => i.to_string(),
+                    duckdb::types::Value::BigInt(i) => i.to_string(),
+                    duckdb::types::Value::HugeInt(i) => i.to_string(),
+                    duckdb::types::Value::Float(f) => f.to_string(),
+                    duckdb::types::Value::Double(f) => f.to_string(),
+                    duckdb::types::Value::Text(t) => t,
+                    duckdb::types::Value::Blob(b) => format!("<blob {} bytes>", b.len()),
+                    _ => format!("{:?}", val),
+                };
+                row_data.push(val_str);
             }
+            rows.push(row_data);
         }
 
         let execution_time_ms = start.elapsed().as_millis() as u64;
