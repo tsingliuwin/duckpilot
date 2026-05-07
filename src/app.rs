@@ -1,0 +1,330 @@
+use crossterm::event::{KeyCode, KeyModifiers};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+use crate::config::{GlobalSettings, ProjectConfig};
+use crate::engine::DbEngine;
+use crate::llm::LlmClient;
+use crate::tui::event::{AppEvent, EventHandler, TableSchema};
+use crate::tui::terminal::TerminalManager;
+use crate::tui::widgets::{
+    chat::{ChatPanel, MessageRole},
+    input::InputBox,
+    schema_panel::SchemaPanel,
+    status_bar::StatusBarData,
+    table_view::TableView,
+};
+
+/// 焦点区域
+#[derive(Debug, Clone, PartialEq)]
+pub enum FocusArea {
+    Input,
+    Chat,
+    Schema,
+    Table,
+}
+
+/// 右侧视图模式
+#[derive(Debug, Clone, PartialEq)]
+pub enum ViewMode {
+    Chat,
+    Table,
+    Split,
+}
+
+/// 应用核心状态
+pub struct App {
+    pub running: bool,
+    pub focus: FocusArea,
+    pub view_mode: ViewMode,
+    pub project_dir: PathBuf,
+
+    // UI 组件
+    pub chat_panel: ChatPanel,
+    pub input_box: InputBox,
+    pub schema_panel: SchemaPanel,
+    pub table_view: TableView,
+    pub status_bar: StatusBarData,
+
+    // 配置
+    pub global_settings: GlobalSettings,
+    pub project_config: ProjectConfig,
+
+    // 引擎与 LLM
+    pub engine: Arc<Mutex<DbEngine>>,
+    pub llm: Arc<LlmClient>,
+
+    // 缓存 Schema
+    pub schemas: Vec<TableSchema>,
+
+    // 事件发送器（用于异步任务回传结果）
+    pub event_sender: tokio::sync::mpsc::UnboundedSender<AppEvent>,
+}
+
+impl App {
+    pub fn new(project_dir: PathBuf, event_sender: tokio::sync::mpsc::UnboundedSender<AppEvent>) -> Self {
+        let global_settings = GlobalSettings::load().unwrap_or_default();
+        let project_config = ProjectConfig::load(&project_dir).unwrap_or_default();
+
+        let engine = Arc::new(Mutex::new(DbEngine::new().expect("无法初始化 DuckDB 引擎")));
+        let llm = Arc::new(LlmClient::new(&global_settings));
+
+        let project_name = if project_config.name.is_empty() {
+            project_dir.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("未知项目")
+                .to_string()
+        } else {
+            project_config.name.clone()
+        };
+
+        let status_bar = StatusBarData {
+            db_connected: false,
+            llm_configured: global_settings.is_configured(),
+            model_name: global_settings.model.clone(),
+            project_name,
+            data_files_count: 0,
+            mode: "Chat".to_string(),
+        };
+
+        Self {
+            running: true,
+            focus: FocusArea::Input,
+            view_mode: ViewMode::Chat,
+            project_dir,
+            chat_panel: ChatPanel::default(),
+            input_box: InputBox::default(),
+            schema_panel: SchemaPanel::default(),
+            table_view: TableView::default(),
+            status_bar,
+            global_settings,
+            project_config,
+            engine,
+            llm,
+            schemas: Vec::new(),
+            event_sender,
+        }
+    }
+
+    /// 启动后台扫描任务
+    pub fn start_scanning(&self) {
+        let engine = self.engine.clone();
+        let project_dir = self.project_dir.clone();
+        let tx = self.event_sender.clone();
+
+        tokio::spawn(async move {
+            let data_dir = project_dir.join("data");
+            let engine_lock = engine.lock().await;
+            match engine_lock.scan_and_register_files(&data_dir) {
+                Ok(schemas) => {
+                    let _ = tx.send(AppEvent::SchemaDone(schemas));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::QueryError(format!("扫描数据文件失败: {}", e)));
+                }
+            }
+        });
+    }
+
+    /// 处理事件
+    pub fn handle_event(&mut self, event: AppEvent) {
+        match event {
+            AppEvent::Key(key) => self.handle_key(key),
+            AppEvent::LlmChunk(chunk) => {
+                self.chat_panel.append_streaming(&chunk);
+            }
+            AppEvent::LlmDone => {
+                self.chat_panel.finish_streaming();
+                
+                // 获取刚生成的完整消息
+                if let Some(msg) = self.chat_panel.messages.last() {
+                    if msg.role == MessageRole::Assistant {
+                        let sql = crate::llm::LlmClient::extract_sql(&msg.content);
+                        if !sql.is_empty() && !sql.starts_with("--") {
+                            // 更新最后一条消息，添加 SQL 显示
+                            let mut msg = msg.clone();
+                            msg.sql = Some(sql.clone());
+                            self.chat_panel.messages.pop();
+                            self.chat_panel.messages.push(msg);
+                            
+                            // 执行 SQL
+                            self.execute_sql(sql);
+                        }
+                    }
+                }
+            }
+            AppEvent::LlmError(err) => {
+                self.chat_panel.finish_streaming();
+                self.chat_panel.add_message(MessageRole::System, format!("❌ LLM 错误: {}", err));
+            }
+            AppEvent::QueryResult(data) => {
+                let summary = format!("查询完成：{} 行 × {} 列，耗时 {}ms", data.row_count, data.columns.len(), data.execution_time_ms);
+                self.chat_panel.add_message(MessageRole::System, summary);
+                self.table_view.set_data(data);
+                self.view_mode = ViewMode::Split;
+            }
+            AppEvent::QueryError(err) => {
+                self.chat_panel.add_message(MessageRole::System, format!("❌ 查询错误: {}", err));
+            }
+            AppEvent::SchemaDone(schemas) => {
+                self.schemas = schemas.clone();
+                self.status_bar.data_files_count = schemas.len();
+                self.status_bar.db_connected = true;
+                self.schema_panel.set_schemas(schemas);
+            }
+            AppEvent::Resize(_, _) => {}
+            AppEvent::Mouse(_) => {}
+            AppEvent::Tick => {}
+        }
+    }
+
+    fn execute_sql(&self, sql: String) {
+        let engine = self.engine.clone();
+        let tx = self.event_sender.clone();
+        
+        tokio::spawn(async move {
+            let engine_lock = engine.lock().await;
+            match engine_lock.execute_query(&sql) {
+                Ok(data) => {
+                    let _ = tx.send(AppEvent::QueryResult(data));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::QueryError(format!("SQL 执行失败: {}", e)));
+                }
+            }
+        });
+    }
+
+    fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
+        // 全局快捷键
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => {
+                if self.focus != FocusArea::Input {
+                    self.focus = FocusArea::Input;
+                } else {
+                    self.running = false;
+                }
+                return;
+            }
+            (KeyCode::Tab, KeyModifiers::NONE) => {
+                self.focus = match self.focus {
+                    FocusArea::Input => FocusArea::Chat,
+                    FocusArea::Chat => FocusArea::Schema,
+                    FocusArea::Schema => FocusArea::Table,
+                    FocusArea::Table => FocusArea::Input,
+                };
+                return;
+            }
+            (KeyCode::BackTab, _) => {
+                self.focus = match self.focus {
+                    FocusArea::Input => FocusArea::Table,
+                    FocusArea::Chat => FocusArea::Input,
+                    FocusArea::Schema => FocusArea::Chat,
+                    FocusArea::Table => FocusArea::Schema,
+                };
+                return;
+            }
+            (KeyCode::F(1), _) => { self.view_mode = ViewMode::Chat; return; }
+            (KeyCode::F(2), _) => { self.view_mode = ViewMode::Table; return; }
+            (KeyCode::F(3), _) => { self.view_mode = ViewMode::Split; return; }
+            _ => {}
+        }
+
+        // 根据焦点区域分发键盘事件
+        match self.focus {
+            FocusArea::Input => {
+                if let Some(submitted) = self.input_box.handle_key(key) {
+                    self.on_submit(submitted);
+                }
+            }
+            FocusArea::Chat => match key.code {
+                KeyCode::Up => self.chat_panel.scroll_up(),
+                KeyCode::Down => self.chat_panel.scroll_down(),
+                _ => {}
+            },
+            FocusArea::Schema => match key.code {
+                KeyCode::Up => self.schema_panel.previous(),
+                KeyCode::Down => self.schema_panel.next(),
+                KeyCode::Enter => self.schema_panel.toggle_expand(),
+                _ => {}
+            },
+            FocusArea::Table => match key.code {
+                KeyCode::Up => self.table_view.scroll_up(),
+                KeyCode::Down => self.table_view.scroll_down(),
+                _ => {}
+            },
+        }
+    }
+
+    /// 用户提交输入后的处理
+    fn on_submit(&mut self, input: String) {
+        // 处理特殊命令
+        let trimmed = input.trim();
+        if trimmed.starts_with('/') {
+            match trimmed {
+                "/quit" | "/exit" | "/q" => { self.running = false; return; }
+                "/clear" => { self.chat_panel = ChatPanel::default(); return; }
+                "/chat" => { self.view_mode = ViewMode::Chat; return; }
+                "/table" => { self.view_mode = ViewMode::Table; return; }
+                "/split" => { self.view_mode = ViewMode::Split; return; }
+                "/help" => {
+                    self.chat_panel.add_message(MessageRole::System,
+                        "可用命令:\n  /clear - 清空对话\n  /chat - 聊天视图\n  /table - 表格视图\n  /split - 分屏视图\n  /quit - 退出\n\n快捷键:\n  Tab - 切换焦点\n  F1/F2/F3 - 切换视图\n  Esc - 退出".to_string()
+                    );
+                    return;
+                }
+                _ => {
+                    self.chat_panel.add_message(MessageRole::System, format!("未知命令: {}", trimmed));
+                    return;
+                }
+            }
+        }
+
+        // 添加用户消息
+        self.chat_panel.add_message(MessageRole::User, input.clone());
+
+        // 发送给 LLM 进行 NL2SQL 处理
+        self.chat_panel.start_streaming();
+        
+        let llm = self.llm.clone();
+        let schemas = self.schemas.clone();
+        let tx = self.event_sender.clone();
+        let question = input;
+
+        tokio::spawn(async move {
+            let callback = |chunk: String| {
+                let _ = tx.send(AppEvent::LlmChunk(chunk));
+            };
+
+            match llm.ask_sql_stream(&question, &schemas, callback).await {
+                Ok(_) => {
+                    let _ = tx.send(AppEvent::LlmDone);
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::LlmError(e.to_string()));
+                }
+            }
+        });
+    }
+
+    /// 运行 TUI 主循环
+    pub async fn run(&mut self, events: &mut EventHandler) -> anyhow::Result<()> {
+        let mut terminal = TerminalManager::init()?;
+
+        while self.running {
+            // 渲染
+            terminal.draw(|frame| {
+                crate::tui::ui::render(self, frame);
+            })?;
+
+            // 等待事件
+            if let Some(event) = events.next().await {
+                self.handle_event(event);
+            }
+        }
+
+        TerminalManager::restore()?;
+        Ok(())
+    }
+}
