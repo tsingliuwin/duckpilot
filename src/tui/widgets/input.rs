@@ -154,7 +154,13 @@ impl InputBox {
             Style::default().fg(Color::Rgb(240, 240, 240))
         };
         self.textarea.set_style(style);
-        self.textarea.set_cursor_style(Style::default());
+        
+        // 当获得焦点时，显示反色光标
+        if self.focused {
+            self.textarea.set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
+        } else {
+            self.textarea.set_cursor_style(Style::default());
+        }
 
         frame.render_widget(&self.textarea, area);
     }

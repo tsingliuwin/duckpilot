@@ -308,4 +308,22 @@ impl DbEngine {
             execution_time_ms,
         })
     }
+
+    /// 使用自定义参数重载表。用于 Agent 自主修复数据读取问题。
+    pub fn reload_table(&self, table_name: &str, file_path: &str, options: &str) -> Result<()> {
+        let ext = Path::new(file_path).extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        let source_fn = match ext.as_str() {
+            "xlsx" | "xls" => format!("read_xlsx('{}', {})", file_path, options),
+            "csv" => format!("read_csv_auto('{}', {})", file_path, options),
+            "parquet" => format!("read_parquet('{}', {})", file_path, options),
+            _ => anyhow::bail!("不支持的文件格式: {}", ext),
+        };
+
+        // 先删除旧表
+        let _ = self.conn.execute(&format!("DROP TABLE IF EXISTS \"{}\"", table_name), []);
+        
+        // 执行创建
+        self.execute_create_with_source(table_name, &source_fn)?;
+        Ok(())
+    }
 }

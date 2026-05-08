@@ -16,6 +16,7 @@ pub enum AgentTool {
     DescribeTable(tools::DescribeTableTool),
     ExecuteQuery(tools::ExecuteQueryTool),
     SampleData(tools::SampleDataTool),
+    RepairTable(tools::RepairTableTool),
 }
 
 impl ToolInfo for AgentTool {
@@ -25,6 +26,7 @@ impl ToolInfo for AgentTool {
             Self::DescribeTable(t) => t.name(),
             Self::ExecuteQuery(t) => t.name(),
             Self::SampleData(t) => t.name(),
+            Self::RepairTable(t) => t.name(),
         }
     }
 
@@ -34,6 +36,7 @@ impl ToolInfo for AgentTool {
             Self::DescribeTable(t) => t.description(),
             Self::ExecuteQuery(t) => t.description(),
             Self::SampleData(t) => t.description(),
+            Self::RepairTable(t) => t.description(),
         }
     }
 
@@ -43,6 +46,7 @@ impl ToolInfo for AgentTool {
             Self::DescribeTable(t) => t.parameters(),
             Self::ExecuteQuery(t) => t.parameters(),
             Self::SampleData(t) => t.parameters(),
+            Self::RepairTable(t) => t.parameters(),
         }
     }
 }
@@ -55,6 +59,7 @@ impl AgentTool {
             Self::DescribeTable(t) => t.execute(db, args),
             Self::ExecuteQuery(t) => t.execute(db, args),
             Self::SampleData(t) => t.execute(db, args),
+            Self::RepairTable(t) => t.execute(db, args),
         }
     }
 }
@@ -112,6 +117,7 @@ pub fn build_registry() -> ToolRegistry {
     reg.register(AgentTool::DescribeTable(tools::DescribeTableTool));
     reg.register(AgentTool::ExecuteQuery(tools::ExecuteQueryTool));
     reg.register(AgentTool::SampleData(tools::SampleDataTool));
+    reg.register(AgentTool::RepairTable(tools::RepairTableTool));
     reg
 }
 
@@ -257,6 +263,37 @@ pub mod tools {
                 output.push_str(&format!("| {} |\n", row.join(" | ")));
             }
             Ok(output)
+        }
+    }
+
+    pub struct RepairTableTool;
+    impl RepairTableTool {
+        pub const NAME: &'static str = "repair_table_schema";
+        pub const DESC: &'static str = "修复表结构检测错误。当你发现某个表的列名不对、有大量空行或数据错位时使用此工具。你可以指定标题行位置、数据范围等参数重新加载文件。";
+        pub fn name(&self) -> &str { Self::NAME }
+        pub fn description(&self) -> &str { Self::DESC }
+        pub fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "table_name": { "type": "string", "description": "要修复的表名" },
+                    "file_path": { "type": "string", "description": "原始文件路径（可从 list_tables 中获取）" },
+                    "options": { 
+                        "type": "string", 
+                        "description": "DuckDB 读取函数的附加参数字符串。例如对于 Excel: 'header=true, range=\'A3:Z100\''；对于 CSV: 'skip=2, delim=\',\''" 
+                    }
+                },
+                "required": ["table_name", "file_path", "options"]
+            })
+        }
+        pub fn execute(&self, db: &DbEngine, args: serde_json::Value) -> Result<String> {
+            let table_name = required_str(&args, "table_name")?;
+            let file_path = required_str(&args, "file_path")?;
+            let options = required_str(&args, "options")?;
+            
+            db.reload_table(&table_name, &file_path, &options)?;
+            
+            Ok(format!("表 {} 已成功使用选项 '{}' 重新加载。请通过 describe_table 或 sample_data 验证修复结果。", table_name, options))
         }
     }
 }

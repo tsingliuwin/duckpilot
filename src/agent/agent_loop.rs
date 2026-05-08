@@ -30,11 +30,27 @@ pub async fn run_agent_loop(
     db: Arc<Mutex<DbEngine>>,
     registry: ToolRegistry,
     tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
+    warnings: Vec<String>,
 ) {
     let tools = registry.to_api_tools();
     let mut messages = vec![Message::System {
         content: build_system_prompt(),
     }];
+
+    // 如果有警告，注入到上下文中提示 Agent
+    if !warnings.is_empty() {
+        let warning_text = warnings.iter()
+            .map(|w| format!("- {}", w))
+            .collect::<Vec<_>>()
+            .join("\n");
+        messages.push(Message::System {
+            content: format!(
+                "⚠️ 数据摄入警告：以下文件在加载时可能存在列检测不准确的问题，请务必先用 sample_data 检查它们：\n{}\n\n如果你发现表结构确实不对，可以使用 repair_table_schema 工具修复。",
+                warning_text
+            ),
+        });
+    }
+
     messages.push(Message::User {
         content: question,
     });

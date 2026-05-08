@@ -61,6 +61,7 @@ pub struct App {
 
     // 缓存 Schema
     pub schemas: Vec<TableSchema>,
+    pub data_warnings: Vec<String>,
 
     // 事件发送器（用于异步任务回传结果）
     pub event_sender: tokio::sync::mpsc::UnboundedSender<AppEvent>,
@@ -120,6 +121,7 @@ impl App {
             engine,
             llm,
             schemas: Vec::new(),
+            data_warnings: Vec::new(),
             event_sender,
             chat_panel_area: None,
             schema_panel_area: None,
@@ -180,6 +182,7 @@ impl App {
             }
             AppEvent::SchemaDone(schemas, warnings) => {
                 self.schemas = schemas.clone();
+                self.data_warnings = warnings.clone();
                 self.status_bar.data_files_count = schemas.len();
                 self.status_bar.db_connected = true;
                 self.schema_panel.set_schemas(schemas);
@@ -402,9 +405,10 @@ impl App {
         let tx = self.event_sender.clone();
         let question = input;
         let registry = build_registry();
+        let warnings = self.data_warnings.clone();
 
         tokio::spawn(async move {
-            run_agent_loop(question, llm, engine, registry, tx).await;
+            run_agent_loop(question, llm, engine, registry, tx, warnings).await;
         });
     }
 
