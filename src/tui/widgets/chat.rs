@@ -10,6 +10,7 @@ pub enum MessageRole {
     User,
     Assistant,
     System,
+    Tool,
 }
 
 /// 聊天消息
@@ -181,6 +182,7 @@ impl ChatPanel {
     }
 
     /// 更新最后一条消息的 SQL
+    #[allow(dead_code)]
     pub fn update_last_message_sql(&mut self, sql: String) {
         if let Some(msg) = self.messages.last_mut() {
             msg.sql = Some(sql);
@@ -323,6 +325,7 @@ impl ChatPanel {
                 MessageRole::User => "你",
                 MessageRole::Assistant => "Pilot",
                 MessageRole::System => "系统",
+                MessageRole::Tool => "工具",
             };
             out.push_str(&format!("[{}] {}\n{}\n", role, msg.timestamp, msg.content));
             if let Some(sql) = &msg.sql {
@@ -378,6 +381,10 @@ impl ChatPanel {
                 MessageRole::System => (
                     "  ⚙️  系统",
                     Style::default().fg(Color::Rgb(255, 183, 77)).bold(),
+                ),
+                MessageRole::Tool => (
+                    "  🔧 工具",
+                    Style::default().fg(Color::Rgb(171, 130, 255)).bold(),
                 ),
             };
 

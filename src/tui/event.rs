@@ -21,6 +21,8 @@ pub enum AppEvent {
     LlmReasoningChunk(String),
     /// LLM 输出完成
     LlmDone,
+    /// Agent 重新开始一轮 LLM 流式输出
+    LlmStreamStart,
     /// LLM 错误
     LlmError(String),
     /// 查询结果
@@ -29,6 +31,10 @@ pub enum AppEvent {
     QueryError(String),
     /// Schema 扫描完成
     SchemaDone(Vec<TableSchema>),
+    /// Agent 工具调用开始
+    ToolCallStarted { id: String, name: String, args: String },
+    /// Agent 工具调用结果
+    ToolCallResult { id: String, name: String, result: String, is_error: bool },
 }
 
 /// 查询结果数据

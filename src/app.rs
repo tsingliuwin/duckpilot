@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::agent::{build_registry, run_agent_loop};
 use crate::config::{GlobalSettings, ProjectConfig};
 use crate::engine::DbEngine;
 use crate::llm::LlmClient;
@@ -160,20 +161,9 @@ impl App {
             }
             AppEvent::LlmDone => {
                 self.chat_panel.finish_streaming();
-                
-                // 获取刚生成的完整消息
-                if let Some(msg) = self.chat_panel.messages.last() {
-                    if msg.role == MessageRole::Assistant {
-                        let sql = crate::llm::LlmClient::extract_sql(&msg.content);
-                        if !sql.is_empty() && !sql.starts_with("--") {
-                            // 更新最后一条消息，添加 SQL 显示
-                            self.chat_panel.update_last_message_sql(sql.clone());
-                            
-                            // 执行 SQL
-                            self.execute_sql(sql);
-                        }
-                    }
-                }
+            }
+            AppEvent::LlmStreamStart => {
+                self.chat_panel.start_streaming();
             }
             AppEvent::LlmError(err) => {
                 self.chat_panel.finish_streaming();
@@ -194,6 +184,31 @@ impl App {
                 self.status_bar.db_connected = true;
                 self.schema_panel.set_schemas(schemas);
             }
+            AppEvent::ToolCallStarted { id: _, name, args } => {
+                let preview: String = args.chars().take(100).collect();
+                let preview = if args.chars().count() > 100 {
+                    format!("{}...", preview)
+                } else {
+                    preview
+                };
+                self.chat_panel.add_message(
+                    MessageRole::Tool,
+                    format!("调用 {}({})", name, preview),
+                );
+            }
+            AppEvent::ToolCallResult { id: _, name, result, is_error } => {
+                let icon = if is_error { "❌" } else { "✅" };
+                let preview: String = result.chars().take(200).collect();
+                let preview = if result.chars().count() > 200 {
+                    format!("{}...", preview)
+                } else {
+                    preview
+                };
+                self.chat_panel.add_message(
+                    MessageRole::Tool,
+                    format!("{} {} 结果：\n{}", icon, name, preview),
+                );
+            }
             AppEvent::Resize(_, _) => {
                 // 通知 chat 面板视口大小变化，需要重建折行缓存
                 self.chat_panel.on_resize();
@@ -203,6 +218,7 @@ impl App {
         }
     }
 
+    #[allow(dead_code)]
     fn execute_sql(&self, sql: String) {
         let engine = self.engine.clone();
         let tx = self.event_sender.clone();
@@ -295,6 +311,10 @@ impl App {
             (KeyCode::F(2), _) => { self.view_mode = ViewMode::Table; return; }
             (KeyCode::F(3), _) => { self.view_mode = ViewMode::Split; return; }
             (KeyCode::F(5), _) => { self.refresh_data(); return; }
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                self.refresh_data();
+                return;
+            }
             (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
                 self.chat_panel.toggle_last_reasoning();
                 return;
@@ -371,31 +391,17 @@ impl App {
         // 添加用户消息
         self.chat_panel.add_message(MessageRole::User, input.clone());
 
-        // 发送给 LLM 进行 NL2SQL 处理
+        // 启动 Agent 循环
         self.chat_panel.start_streaming();
-        
+
         let llm = self.llm.clone();
-        let schemas = self.schemas.clone();
+        let engine = self.engine.clone();
         let tx = self.event_sender.clone();
         let question = input;
+        let registry = build_registry();
 
         tokio::spawn(async move {
-            let tx_reasoning = tx.clone();
-            let content_callback = |chunk: String| {
-                let _ = tx.send(AppEvent::LlmChunk(chunk));
-            };
-            let reasoning_callback = move |chunk: String| {
-                let _ = tx_reasoning.send(AppEvent::LlmReasoningChunk(chunk));
-            };
-
-            match llm.ask_sql_stream(&question, &schemas, content_callback, reasoning_callback).await {
-                Ok(_) => {
-                    let _ = tx.send(AppEvent::LlmDone);
-                }
-                Err(e) => {
-                    let _ = tx.send(AppEvent::LlmError(e.to_string()));
-                }
-            }
+            run_agent_loop(question, llm, engine, registry, tx).await;
         });
     }
 

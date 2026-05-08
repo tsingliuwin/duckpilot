@@ -1,7 +1,7 @@
 use anyhow::Result;
 use futures::StreamExt;
 use crate::config::GlobalSettings;
-use crate::tui::event::TableSchema;
+use crate::agent::message::{messages_to_api, AssistantResponse, StreamingToolCall};
 
 pub struct LlmClient {
     model: String,
@@ -18,24 +18,27 @@ impl LlmClient {
         }
     }
 
-    /// 流式请求 LLM，分别回调 content 和 reasoning_content
-    pub async fn ask_sql_stream(
+    /// 带工具的流式 Agent 请求
+    pub async fn ask_with_tools_stream(
         &self,
-        question: &str,
-        schemas: &[TableSchema],
-        content_callback: impl Fn(String),
-        reasoning_callback: impl Fn(String),
-    ) -> Result<(String, String)> {
-        let system_prompt = Self::build_system_prompt(schemas);
+        messages: &[crate::agent::Message],
+        tools: &[serde_json::Value],
+        on_text: impl Fn(String),
+        on_reasoning: impl Fn(String),
+        on_tool_call_started: impl Fn(&str, &str, &str),
+    ) -> Result<AssistantResponse> {
+        let api_messages = messages_to_api(messages);
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": question}
-            ],
-            "stream": true
+            "messages": api_messages,
+            "stream": true,
         });
+
+        if !tools.is_empty() {
+            body["tools"] = serde_json::json!(tools);
+            body["tool_choice"] = serde_json::json!("auto");
+        }
 
         let url = format!("{}/chat/completions", self.api_base.trim_end_matches('/'));
 
@@ -53,8 +56,7 @@ impl LlmClient {
             anyhow::bail!("API error {}: {}", status, text);
         }
 
-        let mut full_content = String::new();
-        let mut full_reasoning = String::new();
+        let mut response_accum = AssistantResponse::default();
         let mut buffer = String::new();
 
         let mut stream = response.bytes_stream();
@@ -66,22 +68,79 @@ impl LlmClient {
                 let line = buffer[..pos].trim_end().to_string();
                 buffer = buffer[pos + 1..].to_string();
 
+                if line.is_empty() {
+                    continue;
+                }
+
                 if let Some(data) = line.strip_prefix("data: ") {
                     if data == "[DONE]" {
                         break;
                     }
                     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) {
-                        if let Some(delta) = parsed["choices"].get(0).and_then(|c| c.get("delta")) {
-                            if let Some(r) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
-                                if !r.is_empty() {
-                                    full_reasoning.push_str(r);
-                                    reasoning_callback(r.to_string());
+                        if let Some(choice) = parsed["choices"].get(0) {
+                            // reasoning_content
+                            if let Some(delta) = choice.get("delta") {
+                                if let Some(r) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+                                    if !r.is_empty() {
+                                        on_reasoning(r.to_string());
+                                    }
+                                }
+                                // content
+                                if let Some(c) = delta.get("content").and_then(|v| v.as_str()) {
+                                    if !c.is_empty() {
+                                        response_accum.content =
+                                            Some(response_accum.content.unwrap_or_default() + c);
+                                        on_text(c.to_string());
+                                    }
+                                }
+                                // tool_calls
+                                if let Some(tool_calls_delta) = delta.get("tool_calls") {
+                                    if let Some(arr) = tool_calls_delta.as_array() {
+                                        for tc_delta in arr {
+                                            let index = tc_delta["index"]
+                                                .as_u64()
+                                                .unwrap_or(0) as usize;
+
+                                            // 确保有足够的 slot
+                                            while response_accum.tool_calls.len() <= index {
+                                                response_accum.tool_calls.push(StreamingToolCall {
+                                                    id: String::new(),
+                                                    name: String::new(),
+                                                    arguments: String::new(),
+                                                });
+                                            }
+                                            let tc = &mut response_accum.tool_calls[index];
+
+                                            // id（通常在第一个 delta 中出现）
+                                            if let Some(id) = tc_delta["id"].as_str() {
+                                                tc.id = id.to_string();
+                                            }
+                                            // function.name
+                                            if let Some(name) = tc_delta["function"]["name"].as_str() {
+                                                tc.name = name.to_string();
+                                            }
+                                            // function.arguments（增量拼接）
+                                            if let Some(args) = tc_delta["function"]["arguments"].as_str() {
+                                                tc.arguments.push_str(args);
+                                            }
+                                        }
+                                    }
                                 }
                             }
-                            if let Some(c) = delta.get("content").and_then(|v| v.as_str()) {
-                                if !c.is_empty() {
-                                    full_content.push_str(c);
-                                    content_callback(c.to_string());
+
+                            // finish_reason
+                            if let Some(finish) = choice.get("finish_reason").and_then(|v| v.as_str()) {
+                                if finish == "tool_calls" || finish == "stop" {
+                                    // 在完成时通知 UI 每个工具调用
+                                    for tc in &response_accum.tool_calls {
+                                        let preview: String = tc.arguments.chars().take(200).collect();
+                                        let args_preview = if tc.arguments.chars().count() > 200 {
+                                            format!("{}...", preview)
+                                        } else {
+                                            tc.arguments.clone()
+                                        };
+                                        on_tool_call_started(&tc.id, &tc.name, &args_preview);
+                                    }
                                 }
                             }
                         }
@@ -90,42 +149,6 @@ impl LlmClient {
             }
         }
 
-        Ok((full_content, full_reasoning))
-    }
-
-    fn build_system_prompt(schemas: &[TableSchema]) -> String {
-        let mut prompt = String::from(
-            "你是一个专业的 SQL 生成助手，专门为 DuckDB 编写 SQL。\n\
-            请根据提供的表结构，将用户的自然语言问题转换为合法的 DuckDB SQL 语句。\n\n\
-            约束条件：\n\
-            1. 只输出 SQL 语句，不要包含任何解释文字。\n\
-            2. 确保 SQL 语法符合 DuckDB 要求。\n\
-            3. 如果用户的问题无法转换为 SQL，请返回一个说明性的错误提示（以 -- 开头）。\n\n\
-            当前表结构如下：\n"
-        );
-
-        for schema in schemas {
-            prompt.push_str(&format!("\n表名: {}\n", schema.name));
-            prompt.push_str("列信息:\n");
-            for col in &schema.columns {
-                prompt.push_str(&format!("  - {} ({}, {})\n", col.name, col.data_type, if col.nullable { "可为空" } else { "必填" }));
-            }
-        }
-
-        prompt
-    }
-
-    /// 提取 SQL 语句（如果 LLM 返回了 Markdown 代码块）
-    pub fn extract_sql(content: &str) -> String {
-        if let Some(start) = content.find("```sql") {
-            if let Some(end) = content[start + 6..].find("```") {
-                return content[start + 6..start + 6 + end].trim().to_string();
-            }
-        } else if let Some(start) = content.find("```") {
-             if let Some(end) = content[start + 3..].find("```") {
-                return content[start + 3..start + 3 + end].trim().to_string();
-            }
-        }
-        content.trim().to_string()
+        Ok(response_accum)
     }
 }
