@@ -69,12 +69,8 @@ impl SchemaPanel {
 
         let mut items: Vec<ListItem> = Vec::new();
         for (table_idx, schema) in self.schemas.iter().enumerate() {
-            let icon = if self.expanded[table_idx] { "▼" } else { "▶" };
-            let row_info = schema.row_count.map(|c| format!(" ({}行)", c)).unwrap_or_default();
             items.push(ListItem::new(Line::from(vec![
-                Span::styled(format!(" {} ", icon), Style::default().fg(Color::Rgb(255, 183, 77))),
                 Span::styled(format!("📄 {}", schema.name), Style::default().fg(Color::Rgb(129, 199, 132)).bold()),
-                Span::styled(row_info, Style::default().fg(Color::DarkGray)),
             ])));
             if self.expanded[table_idx] {
                 for col in &schema.columns {

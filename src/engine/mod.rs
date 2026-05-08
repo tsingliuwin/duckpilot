@@ -115,18 +115,11 @@ impl DbEngine {
             });
         }
 
-        // 获取行数
-        let row_count: usize = self.conn.query_row(
-            &format!("SELECT COUNT(*) FROM \"{}\"", table_name),
-            [],
-            |row| row.get(0),
-        ).unwrap_or(0);
-
         Ok(TableSchema {
             name: table_name.to_string(),
             source_file: source_file.to_string(),
             columns,
-            row_count: Some(row_count),
+            row_count: None,
         })
     }
 
