@@ -16,7 +16,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         .constraints([
             Constraint::Length(3),  // 标题栏
             Constraint::Min(10),   // 主内容区
-            Constraint::Length(5), // 输入框（3行内容 + 2行边框）
+            Constraint::Length(4), // 输入框（3行内容 + 1行顶边框）
             Constraint::Length(2), // 状态栏
         ])
         .split(size);

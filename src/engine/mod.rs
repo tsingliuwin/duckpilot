@@ -137,7 +137,21 @@ impl DbEngine {
             return Ok(None);
         }
 
-        // Strategy 2: stop_at_empty=false + header + ignore_errors
+        // Strategy 2: Try different header offsets (common in exported reports)
+        // Some files have titles in the first few rows.
+        // In DuckDB Excel extension, range must be a full range like 'A1:ZZ1000000'
+        let offsets = ["A1:ZZ100000", "A2:ZZ100000", "A3:ZZ100000", "A4:ZZ100000", "A5:ZZ100000"];
+        for r in offsets {
+            let source = format!(
+                "read_xlsx('{}', header=true, range='{}', stop_at_empty=false)",
+                file_path, r
+            );
+            if self.try_create_and_validate(table_name, &source)? {
+                return Ok(None);
+            }
+        }
+
+        // Strategy 3: stop_at_empty=false + header + ignore_errors
         let robust_source = format!(
             "read_xlsx('{}', header=true, stop_at_empty=false, ignore_errors=true)",
             file_path
@@ -146,7 +160,7 @@ impl DbEngine {
             return Ok(None);
         }
 
-        // Strategy 3: all_varchar + stop_at_empty=false
+        // Strategy 4: all_varchar + stop_at_empty=false
         let varchar_source = format!(
             "read_xlsx('{}', header=true, stop_at_empty=false, all_varchar=true, ignore_errors=true)",
             file_path
@@ -157,7 +171,7 @@ impl DbEngine {
 
         // Fallback: accept best-effort result with warning
         let warning = format!(
-            "⚠️ Excel 文件 '{}' 的列检测可能不准确，请检查文件格式（合并单元格/标题行）",
+            "⚠️ Excel 文件 '{}' 的列检测可能不准确，请检查文件格式（合并单元格/标题行）。你可以尝试使用 /help 查看如何修复。",
             file_path
         );
         self.execute_create_with_source(table_name, &varchar_source)?;

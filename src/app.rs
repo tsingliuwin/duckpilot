@@ -431,6 +431,18 @@ impl App {
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         let (row, column) = (mouse.row, mouse.column);
+
+        // 输入框区域：点击聚焦并处理鼠标选择
+        if let Some(area) = self.input_box_area {
+            if row >= area.y && row < area.y + area.height && column >= area.x && column < area.x + area.width {
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    self.focus = FocusArea::Input;
+                }
+                self.input_box.handle_mouse(mouse, area);
+                return;
+            }
+        }
+
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 let delta = self.mouse_scroll.on_scroll(crate::tui::mouse::ScrollDirection::Up);

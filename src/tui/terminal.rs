@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crossterm::{
+    cursor::SetCursorStyle,
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -20,7 +21,12 @@ impl TerminalManager {
         }));
 
         enable_raw_mode()?;
-        execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+        execute!(
+            stdout(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            SetCursorStyle::BlinkingBar
+        )?;
 
         let backend = CrosstermBackend::new(stdout());
         let terminal = Terminal::new(backend)?;
