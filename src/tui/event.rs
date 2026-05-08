@@ -29,8 +29,8 @@ pub enum AppEvent {
     QueryResult(QueryResultData),
     /// 查询错误
     QueryError(String),
-    /// Schema 扫描完成
-    SchemaDone(Vec<TableSchema>),
+    /// Schema 扫描完成 (schemas, warnings)
+    SchemaDone(Vec<TableSchema>, Vec<String>),
     /// Agent 工具调用开始
     ToolCallStarted { id: String, name: String, args: String },
     /// Agent 工具调用结果

@@ -1,35 +1,29 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders},
 };
+use tui_textarea::TextArea;
 
-/// 输入框组件
-#[derive(Debug)]
+/// 输入框组件（基于 tui-textarea 实现）
 pub struct InputBox {
-    /// 当前输入内容
-    pub content: String,
-    /// 光标位置（字符索引）
-    pub cursor_position: usize,
-    /// 命令历史
-    pub history: Vec<String>,
-    /// 历史浏览索引
-    pub history_index: Option<usize>,
+    textarea: TextArea<'static>,
+    history: Vec<String>,
+    history_index: Option<usize>,
+    temp_content: String,
     /// 是否获得焦点
     pub focused: bool,
-    /// 临时保存的当前输入（浏览历史时）
-    temp_content: String,
 }
 
 impl Default for InputBox {
     fn default() -> Self {
+        let textarea = TextArea::default();
         Self {
-            content: String::new(),
-            cursor_position: 0,
+            textarea,
             history: Vec::new(),
             history_index: None,
-            focused: true,
             temp_content: String::new(),
+            focused: true,
         }
     }
 }
@@ -40,72 +34,28 @@ impl InputBox {
         match (key.code, key.modifiers) {
             // Enter 提交
             (KeyCode::Enter, KeyModifiers::NONE) => {
-                if self.content.trim().is_empty() {
+                let text = self.textarea.lines().join("\n");
+                if text.trim().is_empty() {
                     return None;
                 }
-                let submitted = self.content.clone();
-                self.history.push(submitted.clone());
-                self.content.clear();
-                self.cursor_position = 0;
+                self.history.push(text.clone());
+                self.clear_text();
                 self.history_index = None;
-                Some(submitted)
+                Some(text)
             }
 
-            // 退格删除
-            (KeyCode::Backspace, _) => {
-                if self.cursor_position > 0 {
-                    let byte_pos = self.char_to_byte(self.cursor_position - 1);
-                    let next_byte_pos = self.char_to_byte(self.cursor_position);
-                    self.content.replace_range(byte_pos..next_byte_pos, "");
-                    self.cursor_position -= 1;
-                }
-                None
-            }
-
-            // Delete 键
-            (KeyCode::Delete, _) => {
-                let char_count = self.content.chars().count();
-                if self.cursor_position < char_count {
-                    let byte_pos = self.char_to_byte(self.cursor_position);
-                    let next_byte_pos = self.char_to_byte(self.cursor_position + 1);
-                    self.content.replace_range(byte_pos..next_byte_pos, "");
-                }
-                None
-            }
-
-            // 左移光标
-            (KeyCode::Left, _) => {
-                self.cursor_position = self.cursor_position.saturating_sub(1);
-                None
-            }
-
-            // 右移光标
-            (KeyCode::Right, _) => {
-                let char_count = self.content.chars().count();
-                if self.cursor_position < char_count {
-                    self.cursor_position += 1;
-                }
-                None
-            }
-
-            // Home
-            (KeyCode::Home, _) => {
-                self.cursor_position = 0;
-                None
-            }
-
-            // End
-            (KeyCode::End, _) => {
-                self.cursor_position = self.content.chars().count();
+            // Shift+Enter 或 Alt+Enter 换行
+            (KeyCode::Enter, KeyModifiers::SHIFT) | (KeyCode::Enter, KeyModifiers::ALT) => {
+                self.textarea.insert_newline();
                 None
             }
 
             // 上翻历史
-            (KeyCode::Up, _) => {
+            (KeyCode::Up, KeyModifiers::NONE) => {
                 if !self.history.is_empty() {
                     match self.history_index {
                         None => {
-                            self.temp_content = self.content.clone();
+                            self.temp_content = self.textarea.lines().join("\n");
                             self.history_index = Some(self.history.len() - 1);
                         }
                         Some(idx) if idx > 0 => {
@@ -114,113 +64,98 @@ impl InputBox {
                         _ => {}
                     }
                     if let Some(idx) = self.history_index {
-                        self.content = self.history[idx].clone();
-                        self.cursor_position = self.content.chars().count();
+                        let text = self.history[idx].clone();
+                        self.set_text(&text);
                     }
                 }
                 None
             }
 
             // 下翻历史
-            (KeyCode::Down, _) => {
+            (KeyCode::Down, KeyModifiers::NONE) => {
                 if let Some(idx) = self.history_index {
                     if idx < self.history.len() - 1 {
                         self.history_index = Some(idx + 1);
-                        self.content = self.history[idx + 1].clone();
+                        let text = self.history[idx + 1].clone();
+                        self.set_text(&text);
                     } else {
                         self.history_index = None;
-                        self.content = self.temp_content.clone();
+                        let text = self.temp_content.clone();
+                        self.set_text(&text);
                     }
-                    self.cursor_position = self.content.chars().count();
                 }
                 None
             }
 
-            // Ctrl+U 清空行
-            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-                self.content.clear();
-                self.cursor_position = 0;
+            // Ctrl+A 全选
+            (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
+                self.textarea.select_all();
                 None
             }
 
-            // 普通字符输入
-            (KeyCode::Char(c), _) => {
-                let byte_pos = self.char_to_byte(self.cursor_position);
-                self.content.insert(byte_pos, c);
-                self.cursor_position += 1;
+            // Ctrl+C 复制选中文本
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                let yanked = self.textarea.yank_text();
+                if !yanked.is_empty() {
+                    let _ = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&yanked));
+                }
                 None
             }
 
-            _ => None,
+            // Ctrl+V 粘贴文本
+            (KeyCode::Char('v'), KeyModifiers::CONTROL) => {
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    if let Ok(text) = clipboard.get_text() {
+                        let text = text.replace("\r\n", "\n");
+                        self.textarea.insert_str(text);
+                    }
+                }
+                None
+            }
+
+            // 其他按键交给 textarea 处理
+            _ => {
+                self.textarea.input(key);
+                None
+            }
         }
     }
 
-    /// 将字符索引转换为字节索引
-    fn char_to_byte(&self, char_idx: usize) -> usize {
-        self.content
-            .char_indices()
-            .nth(char_idx)
-            .map(|(i, _)| i)
-            .unwrap_or(self.content.len())
+    fn clear_text(&mut self) {
+        self.textarea = TextArea::default();
+    }
+
+    fn set_text(&mut self, text: &str) {
+        let lines: Vec<String> = text.split('\n').map(String::from).collect();
+        self.textarea = TextArea::new(lines);
+        self.textarea.move_cursor(tui_textarea::CursorMove::Bottom);
+        self.textarea.move_cursor(tui_textarea::CursorMove::End);
     }
 
     /// 渲染输入框
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         let border_color = if self.focused {
-            Color::Rgb(100, 149, 237) // 焦点态：蓝色
+            Color::Rgb(100, 149, 237)
         } else {
-            Color::Rgb(80, 80, 80) // 非焦点：暗灰
+            Color::Rgb(80, 80, 80)
         };
 
-        let block = Block::default()
-            .title(" ✏️  输入 (Enter 发送 | Esc 退出) ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(border_color))
-            .border_type(ratatui::widgets::BorderType::Rounded);
+        self.textarea.set_block(
+            Block::default()
+                .title(" ✏️  输入 (Enter 发送 | Shift+Enter 换行 | Esc 退出) ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color))
+                .border_type(ratatui::widgets::BorderType::Rounded),
+        );
 
-        let display_text = if self.content.is_empty() && !self.focused {
-            "输入自然语言问题..."
-        } else if self.content.is_empty() {
-            ""
-        } else {
-            &self.content
-        };
-
-        let style = if self.content.is_empty() && !self.focused {
+        let style = if self.textarea.lines().join("").is_empty() && !self.focused {
             Style::default().fg(Color::DarkGray).italic()
         } else {
             Style::default().fg(Color::Rgb(240, 240, 240))
         };
+        self.textarea.set_style(style);
+        self.textarea.set_cursor_style(Style::default());
 
-        let paragraph = Paragraph::new(display_text)
-            .style(style)
-            .block(block);
-
-        frame.render_widget(paragraph, area);
-
-        // 渲染光标
-        if self.focused {
-            let inner = Rect {
-                x: area.x + 1,
-                y: area.y + 1,
-                width: area.width.saturating_sub(2),
-                height: area.height.saturating_sub(2),
-            };
-
-            // 计算光标显示宽度（考虑中文字符）
-            let cursor_display_width: usize = self
-                .content
-                .chars()
-                .take(self.cursor_position)
-                .map(|c| if c.is_ascii() { 1 } else { 2 })
-                .sum();
-
-            let cursor_x = inner.x + cursor_display_width as u16;
-            let cursor_y = inner.y;
-
-            if cursor_x < inner.x + inner.width {
-                frame.set_cursor_position((cursor_x, cursor_y));
-            }
-        }
+        frame.render_widget(&self.textarea, area);
     }
 }

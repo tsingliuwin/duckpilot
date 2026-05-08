@@ -139,8 +139,8 @@ impl App {
             let data_dir = project_dir.join("data");
             let engine_lock = engine.lock().await;
             match engine_lock.scan_and_register_files(&data_dir) {
-                Ok(schemas) => {
-                    let _ = tx.send(AppEvent::SchemaDone(schemas));
+                Ok((schemas, warnings)) => {
+                    let _ = tx.send(AppEvent::SchemaDone(schemas, warnings));
                 }
                 Err(e) => {
                     let _ = tx.send(AppEvent::QueryError(format!("扫描数据文件失败: {}", e)));
@@ -178,11 +178,14 @@ impl App {
             AppEvent::QueryError(err) => {
                 self.chat_panel.add_message(MessageRole::System, format!("❌ 查询错误: {}", err));
             }
-            AppEvent::SchemaDone(schemas) => {
+            AppEvent::SchemaDone(schemas, warnings) => {
                 self.schemas = schemas.clone();
                 self.status_bar.data_files_count = schemas.len();
                 self.status_bar.db_connected = true;
                 self.schema_panel.set_schemas(schemas);
+                for warning in warnings {
+                    self.chat_panel.add_message(MessageRole::System, warning);
+                }
             }
             AppEvent::ToolCallStarted { id: _, name, args } => {
                 let preview: String = args.chars().take(100).collect();

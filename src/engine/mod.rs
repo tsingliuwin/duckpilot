@@ -57,11 +57,12 @@ impl DbEngine {
     }
 
     /// 扫描目录并注册数据文件为 DuckLake 表
-    pub fn scan_and_register_files(&self, data_dir: &Path) -> Result<Vec<TableSchema>> {
+    pub fn scan_and_register_files(&self, data_dir: &Path) -> Result<(Vec<TableSchema>, Vec<String>)> {
         let mut schemas = Vec::new();
+        let mut warnings = Vec::new();
 
         if !data_dir.exists() {
-            return Ok(schemas);
+            return Ok((schemas, warnings));
         }
 
         for entry in std::fs::read_dir(data_dir)? {
@@ -71,27 +72,20 @@ impl DbEngine {
                 if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                     let ext = ext.to_lowercase();
                     let file_path = path.to_string_lossy();
-                    
-                    let source_fn = match ext.as_str() {
-                        "csv" => format!("read_csv_auto('{}')", file_path),
-                        "parquet" => format!("read_parquet('{}')", file_path),
-                        "xlsx" => format!("read_xlsx('{}')", file_path),
-                        "xls" => format!("read_xlsx('{}')", file_path),
+
+                    let warning = match ext.as_str() {
+                        "csv" => self.load_csv_as_table(table_name, &file_path)?,
+                        "xlsx" | "xls" => self.load_xlsx_as_table(table_name, &file_path)?,
+                        "parquet" => {
+                            let source_fn = format!("read_parquet('{}')", file_path);
+                            self.execute_create_with_source(table_name, &source_fn)?;
+                            None
+                        }
                         _ => continue,
                     };
-
-                    // 将各种格式的数据转换为 DuckLake 表
-                    // 使用 CREATE TABLE IF NOT EXISTS ... AS SELECT * FROM ...
-                    let query = format!("CREATE TABLE IF NOT EXISTS \"{}\" AS SELECT * FROM {}", table_name, source_fn);
-
-                    match self.conn.execute(&query, []) {
-                        Ok(_) => {},
-                        Err(e) => {
-                            // 如果表已存在但结构不同，可能需要处理，这里暂时跳过
-                            if !e.to_string().contains("already exists") {
-                                return Err(e.into());
-                            }
-                        }
+                    
+                    if let Some(w) = warning {
+                        warnings.push(w);
                     }
                     
                     // 获取 Schema
@@ -101,7 +95,7 @@ impl DbEngine {
             }
         }
 
-        Ok(schemas)
+        Ok((schemas, warnings))
     }
 
     fn get_table_schema(&self, table_name: &str, source_file: &str) -> Result<TableSchema> {
@@ -134,6 +128,134 @@ impl DbEngine {
             columns,
             row_count: Some(row_count),
         })
+    }
+
+    fn load_xlsx_as_table(&self, table_name: &str, file_path: &str) -> Result<Option<String>> {
+        // Strategy 1: Default load
+        let default_source = format!("read_xlsx('{}')", file_path);
+        if self.try_create_and_validate(table_name, &default_source)? {
+            return Ok(None);
+        }
+
+        // Strategy 2: stop_at_empty=false + header + ignore_errors
+        let robust_source = format!(
+            "read_xlsx('{}', header=true, stop_at_empty=false, ignore_errors=true)",
+            file_path
+        );
+        if self.try_create_and_validate(table_name, &robust_source)? {
+            return Ok(None);
+        }
+
+        // Strategy 3: all_varchar + stop_at_empty=false
+        let varchar_source = format!(
+            "read_xlsx('{}', header=true, stop_at_empty=false, all_varchar=true, ignore_errors=true)",
+            file_path
+        );
+        if self.try_create_and_validate(table_name, &varchar_source)? {
+            return Ok(None);
+        }
+
+        // Fallback: accept best-effort result with warning
+        let warning = format!(
+            "⚠️ Excel 文件 '{}' 的列检测可能不准确，请检查文件格式（合并单元格/标题行）",
+            file_path
+        );
+        self.execute_create_with_source(table_name, &varchar_source)?;
+        Ok(Some(warning))
+    }
+
+    fn load_csv_as_table(&self, table_name: &str, file_path: &str) -> Result<Option<String>> {
+        // Strategy 1: sniff_csv pre-check
+        let sniff_ok = self.conn.query_row(
+            &format!(
+                "SELECT count(column_name) FROM (DESCRIBE (SELECT * FROM sniff_csv('{}')))",
+                file_path
+            ),
+            [],
+            |row| row.get::<_, i64>(0),
+        ).unwrap_or(0) > 1;
+
+        if sniff_ok {
+            let source = format!(
+                "read_csv_auto('{}', ignore_errors=true, null_padding=true)",
+                file_path
+            );
+            if self.try_create_and_validate(table_name, &source)? {
+                return Ok(None);
+            }
+        }
+
+        // Strategy 2: full-file scan
+        let full_scan = format!(
+            "read_csv_auto('{}', sample_size=-1, ignore_errors=true, null_padding=true)",
+            file_path
+        );
+        if self.try_create_and_validate(table_name, &full_scan)? {
+            return Ok(None);
+        }
+
+        // Strategy 3: try common delimiters
+        let delimiters = [";", "\t", "|"];
+        for delim in &delimiters {
+            let source = format!(
+                "read_csv_auto('{}', delim='{}', sample_size=-1, ignore_errors=true, null_padding=true)",
+                file_path, delim
+            );
+            if self.try_create_and_validate(table_name, &source)? {
+                return Ok(None);
+            }
+        }
+
+        // Fallback
+        let warning = format!(
+            "⚠️ CSV 文件 '{}' 的列检测可能不准确，请检查文件格式",
+            file_path
+        );
+        self.execute_create_with_source(table_name, &full_scan)?;
+        Ok(Some(warning))
+    }
+
+    fn get_table_column_count(&self, table_name: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            &format!("SELECT count(column_name) FROM (DESCRIBE \"{}\")", table_name),
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn execute_create_with_source(&self, table_name: &str, source_fn: &str) -> Result<()> {
+        let query = format!(
+            "CREATE TABLE IF NOT EXISTS \"{}\" AS SELECT * FROM {}",
+            table_name, source_fn
+        );
+        match self.conn.execute(&query, []) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                if e.to_string().contains("already exists") {
+                    Ok(())
+                } else {
+                    Err(e.into())
+                }
+            }
+        }
+    }
+
+    fn try_create_and_validate(&self, table_name: &str, source_fn: &str) -> Result<bool> {
+        let _ = self.conn.execute(
+            &format!("DROP TABLE IF EXISTS \"{}\"", table_name),
+            [],
+        );
+        self.execute_create_with_source(table_name, source_fn)?;
+        let col_count = self.get_table_column_count(table_name)?;
+        if col_count > 1 {
+            Ok(true)
+        } else {
+            let _ = self.conn.execute(
+                &format!("DROP TABLE IF EXISTS \"{}\"", table_name),
+                [],
+            );
+            Ok(false)
+        }
     }
 
     pub fn execute_query(&self, sql: &str) -> Result<QueryResultData> {
