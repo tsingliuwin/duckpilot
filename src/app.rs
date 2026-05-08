@@ -295,6 +295,10 @@ impl App {
             (KeyCode::F(2), _) => { self.view_mode = ViewMode::Table; return; }
             (KeyCode::F(3), _) => { self.view_mode = ViewMode::Split; return; }
             (KeyCode::F(5), _) => { self.refresh_data(); return; }
+            (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
+                self.chat_panel.toggle_last_reasoning();
+                return;
+            }
             _ => {}
         }
 
@@ -353,7 +357,7 @@ impl App {
                 "/split" => { self.view_mode = ViewMode::Split; return; }
                 "/help" => {
                     self.chat_panel.add_message(MessageRole::System,
-                        "可用命令:\n  /clear - 清空对话\n  /refresh - 刷新数据文件\n  /chat - 聊天视图\n  /table - 表格视图\n  /split - 分屏视图\n  /quit - 退出\n\n快捷键:\n  Tab - 切换焦点\n  F1/F2/F3 - 切换视图\n  F5 - 刷新数据\n  Esc - 退出\n\n对话面板快捷键:\n  ↑/↓ - 逐行滚动\n  PgUp/PgDn - 翻页滚动\n  Home/End - 跳到顶部/底部\n  y - 复制全部对话\n  s - 复制最后一条 SQL\n  r - 复制最后一条回复\n\n🖱️ 鼠标交互:\n  支持原生选择 - 直接用鼠标划选文本即可进行复制".to_string()
+                        "可用命令:\n  /clear - 清空对话\n  /refresh - 刷新数据文件\n  /chat - 聊天视图\n  /table - 表格视图\n  /split - 分屏视图\n  /quit - 退出\n\n快捷键:\n  Tab - 切换焦点\n  F1/F2/F3 - 切换视图\n  F5 - 刷新数据\n  Esc - 退出\n\n对话面板快捷键:\n  ↑/↓ - 逐行滚动\n  PgUp/PgDn - 翻页滚动\n  Home/End - 跳到顶部/底部\n  y - 复制全部对话\n  s - 复制最后一条 SQL\n  r - 复制最后一条回复\n  Ctrl+O - 展开/折叠思考过程\n\n🖱️ 鼠标交互:\n  支持原生选择 - 直接用鼠标划选文本即可进行复制".to_string()
                     );
                     return;
                 }

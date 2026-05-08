@@ -21,6 +21,8 @@ pub struct ChatMessage {
     pub reasoning: Option<String>,
     pub timestamp: String,
     pub show_reasoning: bool,
+    /// 思考过程是否折叠（true = 只显示摘要）
+    pub reasoning_collapsed: bool,
 }
 
 /// 文本选择端点（视口内坐标）
@@ -104,6 +106,7 @@ impl Default for ChatPanel {
                 reasoning: None,
                 timestamp: chrono::Local::now().format("%H:%M").to_string(),
                 show_reasoning: true,
+                reasoning_collapsed: false,
             }],
             scroll_position: 0,
             auto_follow: true,
@@ -130,6 +133,7 @@ impl ChatPanel {
             reasoning: None,
             timestamp: chrono::Local::now().format("%H:%M").to_string(),
             show_reasoning: self.show_reasoning,
+            reasoning_collapsed: false,
         });
         self.lines_dirty = true;
         // auto_follow 模式下，新消息自动跳底部
@@ -166,6 +170,7 @@ impl ChatPanel {
                 reasoning: if reasoning.is_empty() { None } else { Some(reasoning) },
                 timestamp: chrono::Local::now().format("%H:%M").to_string(),
                 show_reasoning: self.show_reasoning,
+                reasoning_collapsed: true,
             });
         }
         self.is_streaming = false;
@@ -344,6 +349,14 @@ impl ChatPanel {
         })
     }
 
+    /// 切换最后一条含思考过程的消息的折叠状态
+    pub fn toggle_last_reasoning(&mut self) {
+        if let Some(msg) = self.messages.iter_mut().rev().find(|m| m.reasoning.is_some()) {
+            msg.reasoning_collapsed = !msg.reasoning_collapsed;
+            self.lines_dirty = true;
+        }
+    }
+
     // ---- 预折行 ----
 
     /// 当视口宽度变化或内容变化时，重建预折行缓存
@@ -379,38 +392,67 @@ impl ChatPanel {
             ]));
             plain.push(label);
 
+            // 推理过程（思考在前）
+            if let Some(reasoning) = &msg.reasoning {
+                if !reasoning.is_empty() {
+                    if !msg.show_reasoning {
+                        // 全局隐藏
+                        lines.push(Line::from(Span::styled(
+                            "    💭 思考过程已隐藏".to_string(),
+                            Style::default().fg(Color::Rgb(80, 80, 100)),
+                        )));
+                        plain.push("    💭 思考过程已隐藏".to_string());
+                    } else if msg.reasoning_collapsed {
+                        // 折叠态：显示前 3 行摘要
+                        let border_style = Style::default().fg(Color::Rgb(100, 100, 120));
+                        let summary_style = Style::default().fg(Color::Rgb(120, 120, 150));
+                        let hint_style = Style::default().fg(Color::Rgb(90, 90, 110));
+
+                        let header = "    ┌─ 💭 思考 ──────────────────";
+                        lines.push(Line::from(Span::styled(header.to_string(), border_style)));
+                        plain.push(header.to_string());
+
+                        let all_lines: Vec<&str> = reasoning.lines().collect();
+                        for rline in all_lines.iter().take(3) {
+                            let prefixed = format!("    │ {}", rline);
+                            wrap_line_into(&prefixed, w, summary_style, &mut lines, &mut plain);
+                        }
+                        if all_lines.len() > 3 {
+                            lines.push(Line::from(Span::styled(
+                                "    │ ...".to_string(),
+                                hint_style,
+                            )));
+                            plain.push("    │ ...".to_string());
+                        }
+                        let footer = "    └─ Ctrl+O 展开查看完整思考 ──";
+                        lines.push(Line::from(Span::styled(footer.to_string(), hint_style)));
+                        plain.push(footer.to_string());
+                    } else {
+                        // 展开态：完整显示
+                        lines.push(Line::from(Span::styled(
+                            "    ┌─ 💭 思考 ──────────────────".to_string(),
+                            Style::default().fg(Color::Rgb(100, 100, 120)),
+                        )));
+                        plain.push("    ┌─ 💭 思考 ──────────────────".to_string());
+                        let r_style = Style::default().fg(Color::Rgb(120, 120, 150));
+                        for rline in reasoning.lines() {
+                            let prefixed = format!("    │ {}", rline);
+                            wrap_line_into(&prefixed, w, r_style, &mut lines, &mut plain);
+                        }
+                        lines.push(Line::from(Span::styled(
+                            "    └───────────────────────────".to_string(),
+                            Style::default().fg(Color::Rgb(100, 100, 120)),
+                        )));
+                        plain.push("    └───────────────────────────".to_string());
+                    }
+                }
+            }
+
             // 消息内容（预折行）
             let content_style = Style::default().fg(Color::Rgb(220, 220, 220));
             for line in msg.content.lines() {
                 let prefixed = format!("    {}", line);
                 wrap_line_into(&prefixed, w, content_style, &mut lines, &mut plain);
-            }
-
-            // 推理过程
-            if let Some(reasoning) = &msg.reasoning {
-                if msg.show_reasoning && !reasoning.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        "    ┌─ 💭 思考 ──────────────────".to_string(),
-                        Style::default().fg(Color::Rgb(100, 100, 120)),
-                    )));
-                    plain.push("    ┌─ 💭 思考 ──────────────────".to_string());
-                    let r_style = Style::default().fg(Color::Rgb(120, 120, 150));
-                    for rline in reasoning.lines() {
-                        let prefixed = format!("    │ {}", rline);
-                        wrap_line_into(&prefixed, w, r_style, &mut lines, &mut plain);
-                    }
-                    lines.push(Line::from(Span::styled(
-                        "    └───────────────────────────".to_string(),
-                        Style::default().fg(Color::Rgb(100, 100, 120)),
-                    )));
-                    plain.push("    └───────────────────────────".to_string());
-                } else if !reasoning.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        "    💭 思考过程已隐藏".to_string(),
-                        Style::default().fg(Color::Rgb(80, 80, 100)),
-                    )));
-                    plain.push("    💭 思考过程已隐藏".to_string());
-                }
             }
 
             // SQL 代码块
